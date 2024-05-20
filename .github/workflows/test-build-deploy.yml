@@ -55,7 +55,9 @@ jobs:
           mkdir -p /go/src/github.com/cortexproject/cortex
           ln -s $GITHUB_WORKSPACE/* /go/src/github.com/cortexproject/cortex
       - name: Run Tests
-        run: make BUILD_IN_CONTAINER=false test
+        run: |
+          go run ./maxproc.go
+          make BUILD_IN_CONTAINER=false test
 
   security:
     name: CodeQL
