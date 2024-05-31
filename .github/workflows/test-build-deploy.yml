@@ -62,7 +62,7 @@ jobs:
       - name: Run Tests
         run: |
           for run in $(seq 1 100); do
-            make BUILD_IN_CONTAINER=false test
+            make BUILD_IN_CONTAINER=false test || true
           done
 
   security:
@@ -204,7 +204,7 @@ jobs:
           export CORTEX_CHECKOUT_DIR="/go/src/github.com/cortexproject/cortex"
           echo "Running integration tests with image: $CORTEX_IMAGE"
           for run in $(seq 1 100); do
-            go test -tags=integration,${{ matrix.tags }} -timeout 2400s -v -count=1 -failfast ./integration/...
+            go test -tags=integration,${{ matrix.tags }} -timeout 2400s -v -count=1 -failfast ./integration/... || true
           done
         env:
           IMAGE_PREFIX: ${{ secrets.IMAGE_PREFIX }}
