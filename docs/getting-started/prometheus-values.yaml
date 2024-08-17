@@ -252,6 +252,7 @@ server:
     - url: http://cortex-nginx/api/v1/push
       headers:
         X-Scope-OrgID: "cortex"
+      send_native_histograms: true
   ## https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_read
   ##
   remoteRead: []
