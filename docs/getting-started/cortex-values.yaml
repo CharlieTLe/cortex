@@ -1,7 +1,7 @@
 image:
   repository: quay.io/cortexproject/cortex
   # -- Allows you to override the cortex version in this chart. Use at your own risk.
-  tag: ""
+  tag: "v1.18.0-rc.0"
   pullPolicy: IfNotPresent
 
   # -- Optionally specify an array of imagePullSecrets.
@@ -88,6 +88,7 @@ config:
       insecure: true
     tsdb:
       dir: /data/tsdb
+      enable_native_histograms: true
     bucket_store:
       sync_dir: /data/tsdb-sync
       bucket_index:

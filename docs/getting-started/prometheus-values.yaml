@@ -218,6 +218,7 @@ server:
 
   extraFlags:
     - web.enable-lifecycle
+    - enable-feature=native-histograms
     ## web.enable-admin-api flag controls access to the administrative HTTP API which includes functionality such as
     ## deleting time series. This is disabled by default.
     # - web.enable-admin-api
