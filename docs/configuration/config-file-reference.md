@@ -768,7 +768,7 @@ swift:
 filesystem:
   # Local filesystem storage directory.
   # CLI flag: -alertmanager-storage.filesystem.dir
-  [dir: <string> | default = ""]
+  [dir: <string> | default = "/"]
 
 # The configstore_config configures the config database storing rules and
 # alerts, and is used by the Cortex alertmanager.
@@ -1047,7 +1047,7 @@ swift:
 filesystem:
   # Local filesystem storage directory.
   # CLI flag: -blocks-storage.filesystem.dir
-  [dir: <string> | default = ""]
+  [dir: <string> | default = "/"]
 
 # This configures how the querier and store-gateway discover and synchronize
 # blocks stored in the bucket.
@@ -4728,7 +4728,7 @@ swift:
 filesystem:
   # Local filesystem storage directory.
   # CLI flag: -ruler-storage.filesystem.dir
-  [dir: <string> | default = ""]
+  [dir: <string> | default = "/"]
 
 # The configstore_config configures the config database storing rules and
 # alerts, and is used by the Cortex alertmanager.
@@ -5015,7 +5015,7 @@ swift:
 filesystem:
   # Local filesystem storage directory.
   # CLI flag: -runtime-config.filesystem.dir
-  [dir: <string> | default = ""]
+  [dir: <string> | default = "/"]
 ```
 
 ### `s3_sse_config`
