@@ -113,7 +113,7 @@ jobs:
           touch build-image/.uptodate
           make BUILD_IN_CONTAINER=false web-build
       - name: Upload Website Artifact
-        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4.3.6
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: website public
           path: website/public/
@@ -125,7 +125,7 @@ jobs:
       - name: Create Docker Images Archive
         run: tar -cvf images.tar /tmp/images
       - name: Upload Docker Images Artifact
-        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4.3.6
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: Docker Images
           path: ./images.tar
