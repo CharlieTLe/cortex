@@ -1688,8 +1688,8 @@ github.com/thanos-io/objstore v0.0.0-20240913074259-63feed0da069 h1:TUPZ6euAh8I6
 github.com/thanos-io/objstore v0.0.0-20240913074259-63feed0da069/go.mod h1:Cba80S8NbVBBdyZKzra7San/jXvpAxArbpFymWzIZhg=
 github.com/thanos-io/promql-engine v0.0.0-20240921092401-37747eddbd31 h1:xPaP58g+3EPohdw4cv+6jv5+LcX6LynhHvQcYwTAMxQ=
 github.com/thanos-io/promql-engine v0.0.0-20240921092401-37747eddbd31/go.mod h1:wx0JlRZtsB2S10JYUgeg5GqLfMxw31SzArP+28yyE00=
-github.com/thanos-io/thanos v0.35.2-0.20241011111532-af0900bfd290 h1:d58OLbcIC6F3TviRFK85Ucdxbs/3cPI1fcLRBWiNThA=
-github.com/thanos-io/thanos v0.35.2-0.20241011111532-af0900bfd290/go.mod h1:kqF1rQspIAL+rktXL3OSKfiDjJmsCRezQblsR56degY=
+github.com/thanos-io/thanos v0.35.2-0.20241029125830-62038110b1bc h1:AoIDFFb3xjED+mmf5g6bnULDgNJWeXtKyjAQ1CKtqfk=
+github.com/thanos-io/thanos v0.35.2-0.20241029125830-62038110b1bc/go.mod h1:6Q6xfe4mUYCYbrixod2dNZqKCK4J9pGRKqF29/cUr/A=
 github.com/tv42/httpunix v0.0.0-20150427012821-b75d8614f926/go.mod h1:9ESjWnEqriFuLhtthL60Sar/7RFoluCcXsuvEwTV5KM=
 github.com/uber/jaeger-client-go v2.28.0+incompatible/go.mod h1:WVhlPFC8FDjOFMMWRy2pZqQJSXxYSwNYOkTr/Z6d3Kk=
 github.com/uber/jaeger-client-go v2.30.0+incompatible h1:D6wyKGCecFaSRUpo8lCVbaOOb6ThwMmTEbhRwtKR97o=
