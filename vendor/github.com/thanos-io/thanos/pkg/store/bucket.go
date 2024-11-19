@@ -922,17 +922,15 @@ func (s *BucketStore) TSDBInfos() []infopb.TSDBInfo {
 		sort.Slice(infos, func(i, j int) bool { return infos[i].MinTime < infos[j].MinTime })
 
 		cur := infos[0]
-		for i, info := range infos {
+		for _, info := range infos {
 			if info.MinTime > cur.MaxTime {
 				res = append(res, cur)
 				cur = info
 				continue
 			}
 			cur.MaxTime = info.MaxTime
-			if i == len(infos)-1 {
-				res = append(res, cur)
-			}
 		}
+		res = append(res, cur)
 	}
 
 	return res
@@ -1690,10 +1688,12 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, seriesSrv storepb.Store
 		s.metrics.seriesBlocksQueried.WithLabelValues(tenant).Observe(float64(stats.blocksQueried))
 	}
 
+	lt := NewProxyResponseLoserTree(respSets...)
+	defer lt.Close()
 	// Merge the sub-results from each selected block.
 	tracing.DoInSpan(ctx, "bucket_store_merge_all", func(ctx context.Context) {
 		begin := time.Now()
-		set := NewResponseDeduplicator(NewProxyResponseLoserTree(respSets...))
+		set := NewResponseDeduplicator(lt)
 		i := 0
 		for set.Next() {
 			i++
@@ -1992,6 +1992,14 @@ func (s *BucketStore) LabelValues(ctx context.Context, req *storepb.LabelValuesR
 
 	resHints := &hintspb.LabelValuesResponseHints{}
 
+	var hasMetricNameEqMatcher = false
+	for _, m := range reqSeriesMatchers {
+		if m.Name == labels.MetricName && m.Type == labels.MatchEqual {
+			hasMetricNameEqMatcher = true
+			break
+		}
+	}
+
 	g, gctx := errgroup.WithContext(ctx)
 
 	var reqBlockMatchers []*labels.Matcher
@@ -2015,6 +2023,7 @@ func (s *BucketStore) LabelValues(ctx context.Context, req *storepb.LabelValuesR
 	var seriesLimiter = s.seriesLimiterFactory(s.metrics.queriesDropped.WithLabelValues("series", tenant))
 	var bytesLimiter = s.bytesLimiterFactory(s.metrics.queriesDropped.WithLabelValues("bytes", tenant))
 	var logger = s.requestLoggerFunc(ctx, s.logger)
+	var stats = &queryStats{}
 
 	for _, b := range s.blocks {
 		b := b
@@ -2033,7 +2042,8 @@ func (s *BucketStore) LabelValues(ctx context.Context, req *storepb.LabelValuesR
 
 		// If we have series matchers and the Label is not an external one, add <labelName> != "" matcher
 		// to only select series that have given label name.
-		if len(reqSeriesMatchersNoExtLabels) > 0 && !b.extLset.Has(req.Label) {
+		// We don't need such matcher if matchers already contain __name__=="something" matcher.
+		if !hasMetricNameEqMatcher && len(reqSeriesMatchersNoExtLabels) > 0 && !b.extLset.Has(req.Label) {
 			m, err := labels.NewMatcher(labels.MatchNotEqual, req.Label, "")
 			if err != nil {
 				return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -2101,7 +2111,12 @@ func (s *BucketStore) LabelValues(ctx context.Context, req *storepb.LabelValuesR
 					s.metrics.lazyExpandedPostingSeriesOverfetchedSizeBytes,
 					tenant,
 				)
-				defer blockClient.Close()
+				defer func() {
+					mtx.Lock()
+					stats = blockClient.MergeStats(stats)
+					mtx.Unlock()
+					blockClient.Close()
+				}()
 
 				if err := blockClient.ExpandPostings(
 					sortedReqSeriesMatchersNoExtLabels,
@@ -2130,7 +2145,7 @@ func (s *BucketStore) LabelValues(ctx context.Context, req *storepb.LabelValuesR
 					}
 
 					val := labelpb.ZLabelsToPromLabels(ls.GetSeries().Labels).Get(req.Label)
-					if val != "" { // Should never be empty since we added labelName!="" matcher to the list of matchers.
+					if val != "" {
 						values[val] = struct{}{}
 					}
 				}
@@ -2153,6 +2168,15 @@ func (s *BucketStore) LabelValues(ctx context.Context, req *storepb.LabelValuesR
 	}
 
 	s.mtx.RUnlock()
+
+	defer func() {
+		if s.debugLogging {
+			level.Debug(logger).Log("msg", "stats query processed",
+				"request", req,
+				"tenant", tenant,
+				"stats", fmt.Sprintf("%+v", stats), "err", err)
+		}
+	}()
 
 	if err := g.Wait(); err != nil {
 		code := codes.Internal
@@ -3353,6 +3377,10 @@ func (r *bucketIndexReader) LoadSeriesForTime(ref storage.SeriesRef, lset *[]sym
 // Close released the underlying resources of the reader.
 func (r *bucketIndexReader) Close() error {
 	r.block.pendingReaders.Done()
+	return nil
+}
+
+func (b *blockSeriesClient) CloseSend() error {
 	return nil
 }
 
