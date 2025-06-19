@@ -327,15 +327,14 @@ jobs:
       # Build Go binaries
       - name: Build binaries
         run: |
-          make dist
+          make BUILD_IN_CONTAINER=false
       
       # Build and push multi-arch images
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: cmd/cortex/Dockerfile
+          context: cmd/cortex
           platforms: linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
