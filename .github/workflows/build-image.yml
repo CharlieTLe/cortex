@@ -19,7 +19,7 @@ permissions:
 
 env:
   REGISTRY: quay.io
-  IMAGE_NAME: cortexproject/build-image
+  IMAGE_NAME: cortexproject/build-image:master-7ce1d1b12
 
 jobs:
   build:
