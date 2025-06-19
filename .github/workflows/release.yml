@@ -1,0 +1,328 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.2.3)'
+        required: true
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+  attestations: write
+  id-token: write
+
+env:
+  REGISTRY: quay.io
+  IMAGE_PREFIX: quay.io/cortexproject/
+
+jobs:
+  # Validate release
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is-prerelease: ${{ steps.version.outputs.is-prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+            IS_PRERELEASE="${{ github.event.inputs.prerelease }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/}
+            # Check if it's a pre-release (contains alpha, beta, rc)
+            if [[ $VERSION =~ (alpha|beta|rc) ]]; then
+              IS_PRERELEASE=true
+            else
+              IS_PRERELEASE=false
+            fi
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "is-prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+          echo "Releasing version: $VERSION (prerelease: $IS_PRERELEASE)"
+      
+      - name: Validate version format
+        run: |
+          if [[ ! "${{ steps.version.outputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "Invalid version format. Expected: vX.Y.Z"
+            exit 1
+          fi
+
+  # Build release artifacts
+  build:
+    runs-on: ubuntu-latest
+    needs: validate
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+          cache: true
+      
+      - name: Build binary
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          CGO_ENABLED=0 go build \
+            -ldflags "-X main.Branch=${GITHUB_REF#refs/heads/} -X main.Revision=${GITHUB_SHA} -X main.Version=${VERSION} -extldflags '-static' -s -w" \
+            -tags netgo \
+            -o cortex-${GOOS}-${GOARCH} \
+            ./cmd/cortex
+          
+          # Create archive
+          if [[ "${{ matrix.os }}" == "windows" ]]; then
+            zip cortex-${VERSION}-${GOOS}-${GOARCH}.zip cortex-${GOOS}-${GOARCH}
+          else
+            tar -czf cortex-${VERSION}-${GOOS}-${GOARCH}.tar.gz cortex-${GOOS}-${GOARCH}
+          fi
+          
+          # Generate checksums
+          if [[ "${{ matrix.os }}" == "windows" ]]; then
+            sha256sum cortex-${VERSION}-${GOOS}-${GOARCH}.zip > cortex-${VERSION}-${GOOS}-${GOARCH}.zip.sha256
+          else
+            sha256sum cortex-${VERSION}-${GOOS}-${GOARCH}.tar.gz > cortex-${VERSION}-${GOOS}-${GOARCH}.tar.gz.sha256
+          fi
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cortex-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            cortex-${{ needs.validate.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.*
+
+  # Build and push container images
+  container:
+    runs-on: ubuntu-latest
+    needs: validate
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-uri: ${{ steps.build.outputs.image-uri }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_REGISTRY_USER }}
+          password: ${{ secrets.QUAY_REGISTRY_PASSWORD }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}cortex
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.validate.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.validate.outputs.version }}
+            type=semver,pattern={{major}},value=${{ needs.validate.outputs.version }}
+      
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Enhanced security features
+          provenance: true
+          sbom: true
+          build-args: |
+            VERSION=${{ needs.validate.outputs.version }}
+            GIT_REVISION=${{ github.sha }}
+      
+      - name: Generate attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}cortex
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # Build packages (DEB/RPM)
+  packages:
+    runs-on: ubuntu-latest
+    needs: [validate, build]
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cortex-linux-${{ matrix.arch }}
+      
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          gem install fpm
+      
+      - name: Create packages
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # Prepare binary
+          chmod +x cortex-linux-${ARCH}
+          mkdir -p package-root/usr/local/bin
+          cp cortex-linux-${ARCH} package-root/usr/local/bin/cortex
+          
+          # Create DEB package
+          fpm -s dir -t deb -n cortex -v ${VERSION#v} \
+            --architecture ${ARCH} \
+            --description "Cortex: A horizontally scalable, highly available, multi-tenant, long term Prometheus." \
+            --url "https://github.com/cortexproject/cortex" \
+            --license "Apache-2.0" \
+            --maintainer "Cortex Team <cortex-team@googlegroups.com>" \
+            --after-install packaging/deb/control/postinst \
+            --before-remove packaging/deb/control/prerm \
+            --config-files /etc/cortex/single-process-config.yaml \
+            --config-files /etc/default/cortex \
+            -C package-root \
+            usr/local/bin/cortex=/usr/local/bin/cortex \
+            docs/configuration/single-process-config-blocks.yaml=/etc/cortex/single-process-config.yaml \
+            packaging/deb/default/cortex=/etc/default/cortex \
+            packaging/deb/systemd/cortex.service=/etc/systemd/system/cortex.service
+          
+          # Create RPM package
+          fpm -s dir -t rpm -n cortex -v ${VERSION#v} \
+            --architecture ${ARCH} \
+            --description "Cortex: A horizontally scalable, highly available, multi-tenant, long term Prometheus." \
+            --url "https://github.com/cortexproject/cortex" \
+            --license "Apache-2.0" \
+            --maintainer "Cortex Team <cortex-team@googlegroups.com>" \
+            --after-install packaging/rpm/control/post \
+            --before-remove packaging/rpm/control/preun \
+            --config-files /etc/cortex/single-process-config.yaml \
+            --config-files /etc/sysconfig/cortex \
+            -C package-root \
+            usr/local/bin/cortex=/usr/local/bin/cortex \
+            docs/configuration/single-process-config-blocks.yaml=/etc/cortex/single-process-config.yaml \
+            packaging/rpm/sysconfig/cortex=/etc/sysconfig/cortex \
+            packaging/rpm/systemd/cortex.service=/etc/systemd/system/cortex.service
+      
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.arch }}
+          path: |
+            *.deb
+            *.rpm
+
+  # Create GitHub release
+  release:
+    runs-on: ubuntu-latest
+    needs: [validate, build, container, packages]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" -o -name "*.deb" -o -name "*.rpm" \) \
+            -exec cp {} release-assets/ \;
+      
+      - name: Generate release notes
+        id: release-notes
+        run: |
+          # Generate changelog since last tag
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "${{ needs.validate.outputs.version }}" | head -n1)
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            echo "## Changes since $PREVIOUS_TAG" > release-notes.md
+            git log --pretty=format:"- %s (%h)" ${PREVIOUS_TAG}..${{ github.sha }} >> release-notes.md
+          else
+            echo "## Initial Release" > release-notes.md
+          fi
+          
+          # Add container image info
+          echo "" >> release-notes.md
+          echo "## Container Images" >> release-notes.md
+          echo "- \`${{ env.IMAGE_PREFIX }}cortex:${{ needs.validate.outputs.version }}\`" >> release-notes.md
+          echo "- \`${{ env.IMAGE_PREFIX }}cortex:latest\`" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "**Digest:** \`${{ needs.container.outputs.image-digest }}\`" >> release-notes.md
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.version }}
+          name: Release ${{ needs.validate.outputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ needs.validate.outputs.is-prerelease == 'true' }}
+          files: release-assets/*
+          generate_release_notes: true
+      
+      - name: Update latest tag
+        if: needs.validate.outputs.is-prerelease == 'false'
+        run: |
+          git tag -f latest
+          git push -f origin latest
+
+  # SLSA provenance
+  provenance:
+    needs: [validate, container]
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+    with:
+      image: ${{ needs.container.outputs.image-uri }}
+      digest: ${{ needs.container.outputs.image-digest }}
+    secrets:
+      registry-username: ${{ secrets.QUAY_REGISTRY_USER }}
+      registry-password: ${{ secrets.QUAY_REGISTRY_PASSWORD }}
