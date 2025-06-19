@@ -123,42 +123,165 @@ jobs:
           make check-doc
           make check-white-noise
 
-  # Unit tests with coverage
+  # Unit tests with coverage - parallelized by package groups
   test:
     runs-on: ubuntu-latest
     needs: [changes, setup-go]
     if: needs.changes.outputs.go == 'true'
     strategy:
+      fail-fast: false
       matrix:
-        test-type: [unit, unit-no-race]
+        include:
+          # Core storage and ingestion (heavy tests)
+          - name: "storage-ingestion"
+            packages: "./pkg/storage/... ./pkg/ingester/... ./pkg/chunk/..."
+            race: true
+          - name: "storage-ingestion-no-race"
+            packages: "./pkg/storage/... ./pkg/ingester/... ./pkg/chunk/..."
+            race: false
+
+          # Query path (heavy tests)
+          - name: "querier-frontend"
+            packages: "./pkg/querier/... ./pkg/frontend/... ./pkg/scheduler/..."
+            race: true
+          - name: "querier-frontend-no-race"
+            packages: "./pkg/querier/... ./pkg/frontend/... ./pkg/scheduler/..."
+            race: false
+
+          # Ruler and alertmanager (moderate tests)
+          - name: "ruler-alertmanager"
+            packages: "./pkg/ruler/... ./pkg/alertmanager/..."
+            race: true
+          - name: "ruler-alertmanager-no-race"
+            packages: "./pkg/ruler/... ./pkg/alertmanager/..."
+            race: false
+
+          # Distributor and ring (moderate tests)
+          - name: "distributor-ring"
+            packages: "./pkg/distributor/... ./pkg/ring/... ./pkg/ha/..."
+            race: true
+          - name: "distributor-ring-no-race"
+            packages: "./pkg/distributor/... ./pkg/ring/... ./pkg/ha/..."
+            race: false
+
+          # Compactor and store gateway (moderate tests)
+          - name: "compactor-storegateway"
+            packages: "./pkg/compactor/... ./pkg/storegateway/..."
+            race: true
+          - name: "compactor-storegateway-no-race"
+            packages: "./pkg/compactor/... ./pkg/storegateway/..."
+            race: false
+
+          # Utilities and smaller packages (lighter tests)
+          - name: "utilities"
+            packages: "./pkg/util/... ./pkg/tenant/... ./pkg/tracing/... ./pkg/api/... ./pkg/configs/... ./pkg/cortex/... ./pkg/flusher/... ./pkg/purger/..."
+            race: true
+          - name: "utilities-no-race"
+            packages: "./pkg/util/... ./pkg/tenant/... ./pkg/tracing/... ./pkg/api/... ./pkg/configs/... ./pkg/cortex/... ./pkg/flusher/... ./pkg/purger/..."
+            race: false
+
+          # Command line tools and remaining packages
+          - name: "cmd-tools"
+            packages: "./cmd/... ./tools/... ./pkg/cortexpb/... ./pkg/engine/... ./pkg/parquetconverter/... ./pkg/querysharding/... ./pkg/testexporter/..."
+            race: true
+          - name: "cmd-tools-no-race"
+            packages: "./cmd/... ./tools/... ./pkg/cortexpb/... ./pkg/engine/... ./pkg/parquetconverter/... ./pkg/querysharding/... ./pkg/testexporter/..."
+            race: false
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      
+
       - name: Run tests
+        env:
+          RACE_FLAG: ${{ matrix.race && '-race' || '' }}
+          COVERAGE_FILE: ${{ matrix.race && 'coverage' || 'coverage-no-race' }}-${{ matrix.name }}.out
         run: |
-          if [[ "${{ matrix.test-type }}" == "unit" ]]; then
-            go test -race -coverprofile=coverage.out -covermode=atomic -timeout=30m ./...
-          else
-            go test -coverprofile=coverage-no-race.out -covermode=atomic -timeout=30m ./...
-          fi
-      
+          echo "Running tests for: ${{ matrix.name }}"
+          echo "Packages: ${{ matrix.packages }}"
+          echo "Race detection: ${{ matrix.race }}"
+          
+          # Create coverage directory
+          mkdir -p coverage
+          
+          # Run tests with appropriate flags
+          go test $RACE_FLAG \
+            -coverprofile=coverage/$COVERAGE_FILE \
+            -covermode=atomic \
+            -timeout=30m \
+            -v \
+            ${{ matrix.packages }}
+
       - name: Upload coverage to Codecov
-        if: matrix.test-type == 'unit'
+        if: matrix.race == true
         uses: codecov/codecov-action@v4
         with:
-          file: coverage.out
+          file: coverage/coverage-${{ matrix.name }}.out
+          flags: ${{ matrix.name }}
+          name: ${{ matrix.name }}
           fail_ci_if_error: false
 
-  # Build Docker images efficiently
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.name }}-${{ matrix.race && 'race' || 'no-race' }}
+          path: coverage/
+          retention-days: 1
+
+  # Combine coverage reports
+  coverage:
+    runs-on: ubuntu-latest
+    needs: test
+    if: always() && needs.test.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download all coverage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*-race
+          path: coverage-reports
+          merge-multiple: true
+
+      - name: Install gocovmerge
+        run: go install github.com/wadey/gocovmerge@latest
+
+      - name: Merge coverage reports
+        run: |
+          find coverage-reports -name "coverage-*.out" -exec echo "Found: {}" \;
+          gocovmerge coverage-reports/coverage-*.out > merged-coverage.out
+
+      - name: Upload merged coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: merged-coverage.out
+          name: merged-coverage
+          fail_ci_if_error: false
+
+      - name: Generate coverage HTML
+        run: |
+          go tool cover -html=merged-coverage.out -o coverage.html
+
+      - name: Upload coverage HTML
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage.html
+
+    # Build Docker images efficiently
   build:
     runs-on: ubuntu-latest
-    needs: [changes, lint, test]
-    if: always() && (needs.lint.result == 'success' || needs.lint.result == 'skipped') && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    needs: [changes, lint, coverage]
+    if: always() && (needs.lint.result == 'success' || needs.lint.result == 'skipped') && (needs.coverage.result == 'success' || needs.coverage.result == 'skipped')
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
@@ -365,10 +488,10 @@ jobs:
         with:
           fail-on-severity: moderate
 
-  # Website deployment (only on main branch)
+    # Website deployment (only on main branch)
   deploy-website:
     runs-on: ubuntu-latest
-    needs: [build, test]
+    needs: [build, coverage]
     if: github.ref == 'refs/heads/master' && github.repository == 'cortexproject/cortex'
     steps:
       - uses: actions/checkout@v4
@@ -401,9 +524,10 @@ jobs:
           publish_branch: master
 
   # Container image deployment
+  # Container image deployment
   deploy:
     runs-on: ubuntu-latest
-    needs: [build, test, lint, integration, integration-configs-db]
+    needs: [build, coverage, lint, integration, integration-configs-db]
     if: (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) && github.repository == 'cortexproject/cortex'
     steps:
       - uses: actions/checkout@v4
