@@ -320,14 +320,14 @@ dist: dist/$(UPTODATE)
 dist/$(UPTODATE):
 	rm -fr ./dist
 	mkdir -p ./dist
-	for os in linux darwin; do \
-      for arch in amd64 arm64; do \
+	for os in linux ; do \
+      for arch in  arm64; do \
         echo "Building Cortex for $$os/$$arch"; \
         GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build $(GO_FLAGS) -o ./dist/cortex-$$os-$$arch ./cmd/cortex; \
         sha256sum ./dist/cortex-$$os-$$arch | cut -d ' ' -f 1 > ./dist/cortex-$$os-$$arch-sha-256; \
-        echo "Building query-tee for $$os/$$arch"; \
-        GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build $(GO_FLAGS) -o ./dist/query-tee-$$os-$$arch ./cmd/query-tee; \
-        sha256sum ./dist/query-tee-$$os-$$arch | cut -d ' ' -f 1 > ./dist/query-tee-$$os-$$arch-sha-256; \
+#        echo "Building query-tee for $$os/$$arch"; \
+#        GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build $(GO_FLAGS) -o ./dist/query-tee-$$os-$$arch ./cmd/query-tee; \
+#        sha256sum ./dist/query-tee-$$os-$$arch | cut -d ' ' -f 1 > ./dist/query-tee-$$os-$$arch-sha-256; \
       done; \
     done; \
     touch $@
