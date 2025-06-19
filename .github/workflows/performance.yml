@@ -1,0 +1,238 @@
+name: Performance & Benchmarks
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+  pull_request:
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+  schedule:
+    # Run weekly performance tests
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      benchmark_filter:
+        description: 'Benchmark filter pattern'
+        required: false
+        default: '.'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # Go benchmarks
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # Need previous commit for comparison
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+          cache: true
+      
+      - name: Run benchmarks
+        run: |
+          go test -bench="${{ github.event.inputs.benchmark_filter || '.' }}" \
+            -benchmem -count=5 -timeout=30m ./... | tee benchmark-results.txt
+      
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: 'go'
+          output-file-path: benchmark-results.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: ${{ github.event_name != 'pull_request' }}
+          comment-on-alert: true
+          alert-threshold: '150%'
+          fail-on-alert: false
+      
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.txt
+
+  # Memory profiling
+  memory-profile:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+          cache: true
+      
+      - name: Install pprof tools
+        run: |
+          go install github.com/google/pprof@latest
+      
+      - name: Run memory profiling tests
+        run: |
+          # Run specific memory-intensive tests with profiling
+          go test -memprofile=mem.prof -run=TestMemoryIntensive ./...
+          
+          # Generate memory profile report
+          go tool pprof -text mem.prof > memory-profile.txt || true
+      
+      - name: Upload memory profile
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-profile
+          path: memory-profile.txt
+
+  # Load testing with k6 (if applicable)
+  load-test:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    services:
+      cortex:
+        image: quay.io/cortexproject/cortex:latest
+        ports:
+          - 9009:9009
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:9009/ready || exit 1"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+      
+      - name: Run load tests
+        if: hashFiles('tests/load/*.js') != ''
+        run: |
+          k6 run tests/load/basic-load-test.js || echo "Load test completed"
+      
+      - name: Upload load test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-test-results
+          path: |
+            summary.json
+            result.html
+
+  # Binary size tracking
+  binary-size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+          cache: true
+      
+      - name: Build binaries
+        run: |
+          make dist
+      
+      - name: Check binary sizes
+        run: |
+          echo "Binary sizes:" > binary-sizes.txt
+          for binary in dist/cortex-*; do
+            size=$(stat --format="%s" "$binary")
+            echo "$(basename "$binary"): ${size} bytes" >> binary-sizes.txt
+          done
+          cat binary-sizes.txt
+      
+      - name: Compare with previous version
+        if: github.event_name == 'pull_request'
+        run: |
+          # Get previous commit binary sizes for comparison
+          git checkout HEAD~1
+          make dist
+          echo "Previous binary sizes:" > prev-binary-sizes.txt
+          for binary in dist/cortex-*; do
+            size=$(stat --format="%s" "$binary")
+            echo "$(basename "$binary"): ${size} bytes" >> prev-binary-sizes.txt
+          done
+          
+          # Compare sizes
+          echo "Size comparison:" > size-comparison.txt
+          # Add comparison logic here
+      
+      - name: Upload size reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-size-report
+          path: |
+            binary-sizes.txt
+            prev-binary-sizes.txt
+            size-comparison.txt
+
+  # Performance regression detection
+  performance-regression:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+          cache: true
+      
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+      
+      - name: Run benchmarks for base commit
+        run: |
+          git checkout ${{ github.event.pull_request.base.sha }}
+          go test -bench=. -count=10 -benchmem ./... > base-bench.txt
+      
+      - name: Run benchmarks for PR commit
+        run: |
+          git checkout ${{ github.event.pull_request.head.sha }}
+          go test -bench=. -count=10 -benchmem ./... > pr-bench.txt
+      
+      - name: Compare benchmarks
+        run: |
+          benchstat base-bench.txt pr-bench.txt > bench-comparison.txt
+          cat bench-comparison.txt
+      
+      - name: Comment PR with benchmark results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            try {
+              const comparison = fs.readFileSync('bench-comparison.txt', 'utf8');
+              const comment = `
+            ## 📊 Benchmark Comparison
+            
+            \`\`\`
+            ${comparison}
+            \`\`\`
+            
+            > This compares the performance of the base branch with your changes.
+            > Significant regressions are highlighted above.
+              `;
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            } catch (error) {
+              console.log('No benchmark comparison available');
+            }

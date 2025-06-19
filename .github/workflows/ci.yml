@@ -1,0 +1,441 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+**
+    paths-ignore:
+      - 'build-image/**'
+      - '.github/workflows/build-image.yml'
+      - 'docs/**'
+      - '*.md'
+  pull_request:
+    paths-ignore:
+      - 'build-image/**'
+      - '.github/workflows/build-image.yml'
+      - 'docs/**'
+      - '*.md'
+
+env:
+  GO_VERSION: '1.24.0'
+  REGISTRY: quay.io
+  IMAGE_PREFIX: quay.io/cortexproject/
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  # Detect changes to optimize what we build/test
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.changes.outputs.go }}
+      docker: ${{ steps.changes.outputs.docker }}
+      integration: ${{ steps.changes.outputs.integration }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - '.golangci.yml'
+            docker:
+              - '**/Dockerfile'
+              - 'build-image/**'
+            integration:
+              - 'integration/**'
+              - 'cmd/**'
+
+  # Modern Go setup with caching
+  setup-go:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      - name: Generate cache key
+        id: cache-key
+        run: |
+          echo "key=go-mod-${{ hashFiles('go.sum') }}" >> $GITHUB_OUTPUT
+      
+      - name: Download dependencies
+        run: go mod download
+
+  # Lint and static analysis
+  lint:
+    runs-on: ubuntu-latest
+    needs: [changes, setup-go]
+    if: needs.changes.outputs.go == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history for better analysis
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      # Modern linting with latest golangci-lint
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=10m
+      
+      # Additional security and quality checks
+      - name: Run gosec security scanner
+        uses: securecodewarrior/github-action-gosec@master
+        with:
+          args: '-no-fail -fmt sarif -out gosec.sarif ./...'
+      
+      - name: Upload SARIF file
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gosec.sarif
+      
+      - name: Check dependencies
+        run: |
+          go mod verify
+          go mod tidy
+          git diff --exit-code -- go.sum go.mod
+      
+      - name: Check generated files
+        run: |
+          make check-protos
+          make check-doc
+          make check-white-noise
+
+  # Unit tests with coverage
+  test:
+    runs-on: ubuntu-latest
+    needs: [changes, setup-go]
+    if: needs.changes.outputs.go == 'true'
+    strategy:
+      matrix:
+        test-type: [unit, unit-no-race]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      - name: Run tests
+        run: |
+          if [[ "${{ matrix.test-type }}" == "unit" ]]; then
+            go test -race -coverprofile=coverage.out -covermode=atomic -timeout=30m ./...
+          else
+            go test -coverprofile=coverage-no-race.out -covermode=atomic -timeout=30m ./...
+          fi
+      
+      - name: Upload coverage to Codecov
+        if: matrix.test-type == 'unit'
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.out
+          fail_ci_if_error: false
+
+  # Build Docker images efficiently
+  build:
+    runs-on: ubuntu-latest
+    needs: [changes, lint, test]
+    if: always() && (needs.lint.result == 'success' || needs.lint.result == 'skipped') && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      # Modern Docker setup
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      
+      # Login for pushing (only on main/tags)
+      - name: Login to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_REGISTRY_USER }}
+          password: ${{ secrets.QUAY_REGISTRY_PASSWORD }}
+      
+      # Generate metadata
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}cortex
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+      
+      # Build Go binaries
+      - name: Build binaries
+        run: |
+          make dist
+      
+      # Build and push multi-arch images
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Modern build features
+          provenance: true
+          sbom: true
+      
+      # Upload binaries as artifacts
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/
+          retention-days: 7
+
+  # Integration tests with better parallelization
+  integration:
+    runs-on: ubuntu-latest
+    needs: [changes, build]
+    if: needs.changes.outputs.integration == 'true' || needs.changes.outputs.go == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: docker
+            tags: requires_docker
+          - name: alertmanager
+            tags: integration_alertmanager
+          - name: backward-compatibility
+            tags: integration_backward_compatibility
+          - name: memberlist
+            tags: integration_memberlist
+          - name: querier
+            tags: integration_querier
+          - name: ruler
+            tags: integration_ruler
+          - name: query-fuzz
+            tags: integration_query_fuzz
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      # Pre-pull common images to avoid timeouts
+      - name: Pre-pull Docker images
+        run: |
+          docker pull minio/minio:RELEASE.2024-05-28T17-19-04Z &
+          docker pull consul:1.8.4 &
+          docker pull gcr.io/etcd-development/etcd:v3.4.7 &
+          docker pull memcached:1.6.1 &
+          docker pull redis:7.0.4-alpine &
+          
+          # Suite-specific images
+          if [[ "${{ matrix.suite.name }}" == "backward-compatibility" ]]; then
+            for version in v1.13.1 v1.13.2 v1.14.0 v1.14.1 v1.15.0 v1.15.1 v1.15.2 v1.15.3 v1.16.0 v1.16.1 v1.17.0 v1.17.1 v1.18.0 v1.18.1; do
+              docker pull quay.io/cortexproject/cortex:$version &
+            done
+          elif [[ "${{ matrix.suite.name }}" == "query-fuzz" ]]; then
+            docker pull quay.io/cortexproject/cortex:v1.18.1 &
+            docker pull quay.io/prometheus/prometheus:v2.51.0 &
+            docker pull quay.io/prometheus/prometheus:v2.55.1 &
+          fi
+          
+          wait # Wait for all background pulls
+      
+      - name: Run integration tests
+        env:
+          CORTEX_IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+        run: |
+          export CORTEX_IMAGE="${CORTEX_IMAGE_PREFIX}cortex:${IMAGE_TAG}"
+          echo "Running integration tests with image: $CORTEX_IMAGE"
+          go test -tags=integration,${{ matrix.suite.tags }} -timeout 40m -v -count=1 ./integration/...
+
+  # Database integration tests
+  integration-configs-db:
+    runs-on: ubuntu-latest
+    needs: [changes, build]
+    if: needs.changes.outputs.integration == 'true' || needs.changes.outputs.go == 'true'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: configs_test
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      - name: Run database integration tests
+        env:
+          DB_ADDR: localhost:5432
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          MIGRATIONS_DIR: ${{ github.workspace }}/cmd/cortex/migrations
+        run: |
+          go test -v -tags 'netgo integration' -timeout 10m ./pkg/configs/... ./pkg/ruler/...
+
+  # Security scanning
+  security:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      # CodeQL analysis
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: go
+          queries: security-extended,security-and-quality
+      
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:go"
+
+  # Dependency scanning
+  dependency-review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+
+  # Website deployment (only on main branch)
+  deploy-website:
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: github.ref == 'refs/heads/master' && github.repository == 'cortexproject/cortex'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ssh-key: ${{ secrets.WEBSITE_DEPLOY_SSH_PRIVATE_KEY }}
+          submodules: recursive
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      - name: Setup Hugo
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: 'latest'
+          extended: true
+      
+      - name: Build website
+        run: |
+          cd website
+          HUGO_ENV=production hugo --config config.toml --minify -v
+      
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          deploy_key: ${{ secrets.WEBSITE_DEPLOY_SSH_PRIVATE_KEY }}
+          publish_dir: ./website/public
+          external_repository: cortexproject/cortexproject.github.io
+          publish_branch: master
+
+  # Container image deployment
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build, test, lint, integration, integration-configs-db]
+    if: (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) && github.repository == 'cortexproject/cortex'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Login to additional registries
+        if: env.DOCKER_REGISTRY_PASSWORD != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+        env:
+          DOCKER_REGISTRY_PASSWORD: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+      
+      - name: Multi-registry push
+        if: needs.build.outputs.image-digest != ''
+        run: |
+          # Images are already built and pushed to Quay in build job
+          # Additional registry pushes can be added here if needed
+          echo "Image successfully deployed: ${{ needs.build.outputs.image-tag }}"
+          echo "Digest: ${{ needs.build.outputs.image-digest }}"
+
+  # Generate SLSA provenance
+  provenance:
+    needs: [build, deploy]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+    with:
+      image: ${{ needs.build.outputs.image-tag }}
+      digest: ${{ needs.build.outputs.image-digest }}
+    secrets:
+      registry-username: ${{ secrets.QUAY_REGISTRY_USER }}
+      registry-password: ${{ secrets.QUAY_REGISTRY_PASSWORD }}

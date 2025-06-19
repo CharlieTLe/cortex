@@ -1,0 +1,163 @@
+name: Security & Dependencies
+
+on:
+  schedule:
+    # Run daily at 6 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/security.yml'
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  # Vulnerability scanning
+  trivy-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner in repo mode
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Container image scanning (if images exist)
+  container-scan:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule' # Skip for scheduled runs to avoid rate limits
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build image for scanning
+        run: |
+          docker build -t cortex-scan:latest .
+      
+      - name: Run Trivy vulnerability scanner on image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'cortex-scan:latest'
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+      
+      - name: Upload image scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+
+  # Dependency updates (Dependabot alternative for more control)
+  dependency-update:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+          cache: true
+      
+      - name: Update Go dependencies
+        run: |
+          go get -u ./...
+          go mod tidy
+      
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet go.mod go.sum; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Create Pull Request
+        if: steps.changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: update Go dependencies'
+          title: 'chore: update Go dependencies'
+          body: |
+            This PR updates Go dependencies to their latest versions.
+            
+            Changes:
+            - Updated Go module dependencies
+            - Ran `go mod tidy` to clean up go.sum
+            
+            Please review the changes and ensure all tests pass.
+          branch: chore/update-dependencies
+          delete-branch: true
+
+  # License compliance check
+  license-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+          cache: true
+      
+      - name: Install go-licenses
+        run: go install github.com/google/go-licenses@latest
+      
+      - name: Check licenses
+        run: |
+          go-licenses check ./...
+      
+      - name: Generate license report
+        run: |
+          go-licenses report ./... > license-report.txt
+      
+      - name: Upload license report
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-report
+          path: license-report.txt
+
+  # Supply chain security with OpenSSF Scorecard
+  scorecard:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      
+      - name: Run analysis
+        uses: ossf/scorecard-action@v2.4.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
