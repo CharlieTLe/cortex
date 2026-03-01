@@ -149,6 +149,11 @@ func (d *CortexCustomDefaulter) Default(ctx context.Context, obj runtime.Object)
 		cortex.Spec.StoreGateway.ShardingEnabled = &t
 	}
 
+	// Zone awareness defaults.
+	if cortex.Spec.ZoneAwareness != nil && cortex.Spec.ZoneAwareness.TopologyKey == "" {
+		cortex.Spec.ZoneAwareness.TopologyKey = "topology.kubernetes.io/zone"
+	}
+
 	return nil
 }
 
@@ -188,6 +193,17 @@ func (v *CortexCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newO
 		newReplicas := cortex.Spec.Ingester.GetReplicas()
 		if newReplicas < oldReplicas {
 			warnings = append(warnings, fmt.Sprintf("scaling down ingesters from %d to %d — ensure ring has stabilized before proceeding", oldReplicas, newReplicas))
+		}
+	}
+
+	// Warn on zone awareness toggle.
+	if ok {
+		oldZA := oldCortex.Spec.IsZoneAwarenessEnabled()
+		newZA := cortex.Spec.IsZoneAwarenessEnabled()
+		if oldZA && !newZA {
+			warnings = append(warnings, "disabling zone awareness — existing per-zone StatefulSets will be replaced with a single StatefulSet")
+		} else if !oldZA && newZA {
+			warnings = append(warnings, "enabling zone awareness — existing StatefulSet will be replaced with per-zone StatefulSets")
 		}
 	}
 
@@ -236,6 +252,58 @@ func validateCortex(cortex *cortexv1alpha1.Cortex) (admission.Warnings, error) {
 		replicas := cortex.Spec.Ingester.GetReplicas()
 		if replicas < rf {
 			return warnings, fmt.Errorf("spec.ingester.replicas (%d) must be >= ring.replicationFactor (%d)", replicas, rf)
+		}
+	}
+
+	// Zone awareness validation.
+	if cortex.Spec.ZoneAwareness != nil && cortex.Spec.ZoneAwareness.Enabled {
+		zones := cortex.Spec.ZoneAwareness.Zones
+
+		if len(zones) < 2 {
+			return warnings, fmt.Errorf("spec.zoneAwareness.zones must have at least 2 entries when zone awareness is enabled")
+		}
+
+		// Check for duplicate zone names.
+		seen := make(map[string]bool)
+		for _, z := range zones {
+			if seen[z] {
+				return warnings, fmt.Errorf("spec.zoneAwareness.zones contains duplicate zone %q", z)
+			}
+			seen[z] = true
+		}
+
+		zoneCount := int32(len(zones))
+
+		// Ingester replicas must be divisible by zone count.
+		if cortex.Spec.Ingester != nil {
+			ingesterReplicas := cortex.Spec.Ingester.GetReplicas()
+			if ingesterReplicas%zoneCount != 0 {
+				return warnings, fmt.Errorf("spec.ingester.replicas (%d) must be divisible by zone count (%d)", ingesterReplicas, zoneCount)
+			}
+		}
+
+		// Store-gateway replicas must be divisible by zone count.
+		if cortex.Spec.StoreGateway != nil {
+			sgReplicas := cortex.Spec.StoreGateway.GetReplicas()
+			if sgReplicas%zoneCount != 0 {
+				return warnings, fmt.Errorf("spec.storeGateway.replicas (%d) must be divisible by zone count (%d)", sgReplicas, zoneCount)
+			}
+		}
+
+		// Compactor replicas must be divisible by zone count.
+		if cortex.Spec.Compactor != nil {
+			compactorReplicas := cortex.Spec.Compactor.GetReplicas()
+			if compactorReplicas%zoneCount != 0 {
+				return warnings, fmt.Errorf("spec.compactor.replicas (%d) must be divisible by zone count (%d)", compactorReplicas, zoneCount)
+			}
+		}
+
+		// Warn if zone count < replication factor.
+		if cortex.Spec.Ring != nil {
+			rf := cortex.Spec.Ring.GetReplicationFactor()
+			if zoneCount < rf {
+				warnings = append(warnings, fmt.Sprintf("zone count (%d) is less than replication factor (%d) — zone-aware replication may not provide full zone failure tolerance", zoneCount, rf))
+			}
 		}
 	}
 

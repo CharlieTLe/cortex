@@ -259,3 +259,284 @@ func TestValidation_ScaleDownWarning(t *testing.T) {
 		t.Error("expected a warning about ingester scale-down")
 	}
 }
+
+func TestValidation_ZoneAwareness_LessThan2Zones(t *testing.T) {
+	cortex := &cortexv1alpha1.Cortex{
+		Spec: cortexv1alpha1.CortexSpec{
+			Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+			Storage: cortexv1alpha1.StorageSpec{
+				Backend: cortexv1alpha1.StorageBackendS3,
+				S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+			},
+			ZoneAwareness: &cortexv1alpha1.ZoneAwarenessSpec{
+				Enabled: true,
+				Zones:   []string{"zone-a"},
+			},
+		},
+	}
+
+	_, err := validateCortex(cortex)
+	if err == nil {
+		t.Error("expected validation error when fewer than 2 zones")
+	}
+}
+
+func TestValidation_ZoneAwareness_DuplicateZones(t *testing.T) {
+	cortex := &cortexv1alpha1.Cortex{
+		Spec: cortexv1alpha1.CortexSpec{
+			Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+			Storage: cortexv1alpha1.StorageSpec{
+				Backend: cortexv1alpha1.StorageBackendS3,
+				S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+			},
+			ZoneAwareness: &cortexv1alpha1.ZoneAwarenessSpec{
+				Enabled: true,
+				Zones:   []string{"zone-a", "zone-a", "zone-b"},
+			},
+		},
+	}
+
+	_, err := validateCortex(cortex)
+	if err == nil {
+		t.Error("expected validation error for duplicate zones")
+	}
+}
+
+func TestValidation_ZoneAwareness_ReplicasNotDivisible(t *testing.T) {
+	cortex := &cortexv1alpha1.Cortex{
+		Spec: cortexv1alpha1.CortexSpec{
+			Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+			Storage: cortexv1alpha1.StorageSpec{
+				Backend: cortexv1alpha1.StorageBackendS3,
+				S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+			},
+			Ingester: &cortexv1alpha1.IngesterComponentSpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(5)),
+				},
+			},
+			ZoneAwareness: &cortexv1alpha1.ZoneAwarenessSpec{
+				Enabled: true,
+				Zones:   []string{"zone-a", "zone-b", "zone-c"},
+			},
+		},
+	}
+
+	_, err := validateCortex(cortex)
+	if err == nil {
+		t.Error("expected validation error when ingester replicas not divisible by zone count")
+	}
+}
+
+func TestValidation_ZoneAwareness_StoreGatewayReplicasNotDivisible(t *testing.T) {
+	cortex := &cortexv1alpha1.Cortex{
+		Spec: cortexv1alpha1.CortexSpec{
+			Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+			Storage: cortexv1alpha1.StorageSpec{
+				Backend: cortexv1alpha1.StorageBackendS3,
+				S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+			},
+			Ingester: &cortexv1alpha1.IngesterComponentSpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(6)),
+				},
+			},
+			StoreGateway: &cortexv1alpha1.StoreGatewaySpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(5)),
+				},
+			},
+			ZoneAwareness: &cortexv1alpha1.ZoneAwarenessSpec{
+				Enabled: true,
+				Zones:   []string{"zone-a", "zone-b", "zone-c"},
+			},
+		},
+	}
+
+	_, err := validateCortex(cortex)
+	if err == nil {
+		t.Error("expected validation error when store-gateway replicas not divisible by zone count")
+	}
+}
+
+func TestValidation_ZoneAwareness_CompactorReplicasNotDivisible(t *testing.T) {
+	cortex := &cortexv1alpha1.Cortex{
+		Spec: cortexv1alpha1.CortexSpec{
+			Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+			Storage: cortexv1alpha1.StorageSpec{
+				Backend: cortexv1alpha1.StorageBackendS3,
+				S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+			},
+			Ingester: &cortexv1alpha1.IngesterComponentSpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(6)),
+				},
+			},
+			StoreGateway: &cortexv1alpha1.StoreGatewaySpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(3)),
+				},
+			},
+			Compactor: &cortexv1alpha1.CompactorComponentSpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(5)),
+				},
+			},
+			ZoneAwareness: &cortexv1alpha1.ZoneAwarenessSpec{
+				Enabled: true,
+				Zones:   []string{"zone-a", "zone-b", "zone-c"},
+			},
+		},
+	}
+
+	_, err := validateCortex(cortex)
+	if err == nil {
+		t.Error("expected validation error when compactor replicas not divisible by zone count")
+	}
+}
+
+func TestValidation_ZoneAwareness_ValidConfig(t *testing.T) {
+	cortex := &cortexv1alpha1.Cortex{
+		Spec: cortexv1alpha1.CortexSpec{
+			Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+			Storage: cortexv1alpha1.StorageSpec{
+				Backend: cortexv1alpha1.StorageBackendS3,
+				S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+			},
+			Ring: &cortexv1alpha1.RingSpec{
+				ReplicationFactor: ptr(int32(3)),
+			},
+			Ingester: &cortexv1alpha1.IngesterComponentSpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(6)),
+				},
+			},
+			StoreGateway: &cortexv1alpha1.StoreGatewaySpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(3)),
+				},
+			},
+			Compactor: &cortexv1alpha1.CompactorComponentSpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(3)),
+				},
+			},
+			ZoneAwareness: &cortexv1alpha1.ZoneAwarenessSpec{
+				Enabled: true,
+				Zones:   []string{"zone-a", "zone-b", "zone-c"},
+			},
+		},
+	}
+
+	_, err := validateCortex(cortex)
+	if err != nil {
+		t.Errorf("expected valid config, got error: %v", err)
+	}
+}
+
+func TestValidation_ZoneAwareness_WarningZonesLessThanRF(t *testing.T) {
+	cortex := &cortexv1alpha1.Cortex{
+		Spec: cortexv1alpha1.CortexSpec{
+			Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+			Storage: cortexv1alpha1.StorageSpec{
+				Backend: cortexv1alpha1.StorageBackendS3,
+				S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+			},
+			Ring: &cortexv1alpha1.RingSpec{
+				ReplicationFactor: ptr(int32(3)),
+			},
+			Ingester: &cortexv1alpha1.IngesterComponentSpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(4)),
+				},
+			},
+			ZoneAwareness: &cortexv1alpha1.ZoneAwarenessSpec{
+				Enabled: true,
+				Zones:   []string{"zone-a", "zone-b"},
+			},
+		},
+	}
+
+	warnings, err := validateCortex(cortex)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(warnings) == 0 {
+		t.Error("expected a warning about zone count < replication factor")
+	}
+}
+
+func TestDefaulting_ZoneAwareness_TopologyKey(t *testing.T) {
+	cortex := &cortexv1alpha1.Cortex{
+		ObjectMeta: metav1.ObjectMeta{Name: "test"},
+		Spec: cortexv1alpha1.CortexSpec{
+			Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+			Storage: cortexv1alpha1.StorageSpec{
+				Backend: cortexv1alpha1.StorageBackendS3,
+				S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+			},
+			ZoneAwareness: &cortexv1alpha1.ZoneAwarenessSpec{
+				Enabled: true,
+				Zones:   []string{"zone-a", "zone-b", "zone-c"},
+			},
+		},
+	}
+
+	defaulter := &CortexCustomDefaulter{}
+	if err := defaulter.Default(nil, cortex); err != nil {
+		t.Fatalf("defaulting failed: %v", err)
+	}
+
+	if cortex.Spec.ZoneAwareness.TopologyKey != "topology.kubernetes.io/zone" {
+		t.Errorf("expected default topologyKey, got %s", cortex.Spec.ZoneAwareness.TopologyKey)
+	}
+}
+
+func TestValidation_ZoneAwarenessToggleWarning(t *testing.T) {
+	validator := &CortexCustomValidator{}
+
+	oldCortex := &cortexv1alpha1.Cortex{
+		Spec: cortexv1alpha1.CortexSpec{
+			Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+			Storage: cortexv1alpha1.StorageSpec{
+				Backend: cortexv1alpha1.StorageBackendS3,
+				S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+			},
+		},
+	}
+
+	newCortex := &cortexv1alpha1.Cortex{
+		Spec: cortexv1alpha1.CortexSpec{
+			Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+			Storage: cortexv1alpha1.StorageSpec{
+				Backend: cortexv1alpha1.StorageBackendS3,
+				S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+			},
+			Ingester: &cortexv1alpha1.IngesterComponentSpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(6)),
+				},
+			},
+			StoreGateway: &cortexv1alpha1.StoreGatewaySpec{
+				ComponentSpec: cortexv1alpha1.ComponentSpec{
+					Replicas: ptr(int32(3)),
+				},
+			},
+			Ring: &cortexv1alpha1.RingSpec{
+				ReplicationFactor: ptr(int32(3)),
+			},
+			ZoneAwareness: &cortexv1alpha1.ZoneAwarenessSpec{
+				Enabled: true,
+				Zones:   []string{"zone-a", "zone-b", "zone-c"},
+			},
+		},
+	}
+
+	warnings, err := validator.ValidateUpdate(nil, oldCortex, newCortex)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(warnings) == 0 {
+		t.Error("expected a warning about enabling zone awareness")
+	}
+}

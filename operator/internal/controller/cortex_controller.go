@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -27,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -101,27 +103,20 @@ func (r *CortexReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("reconciling gossip service: %w", err)
 	}
 
-	// 3. Ingester (headless service + StatefulSet + PDB)
-	if err := r.reconcileService(ctx, buildHeadlessService(cortex, ComponentIngester)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling ingester headless service: %w", err)
+	// 3. Ingester (zone-aware or single StatefulSet)
+	var requeueNeeded bool
+	requeue, err := r.reconcileStatefulComponent(ctx, cortex, ComponentIngester, configData)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling ingester: %w", err)
 	}
-	if err := r.reconcileStatefulSet(ctx, buildIngesterStatefulSet(cortex, configData)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling ingester StatefulSet: %w", err)
-	}
-	if err := r.reconcilePDB(ctx, buildPodDisruptionBudget(cortex, ComponentIngester)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling ingester PDB: %w", err)
-	}
+	requeueNeeded = requeueNeeded || requeue
 
-	// 4. Store Gateway (headless service + StatefulSet + PDB)
-	if err := r.reconcileService(ctx, buildHeadlessService(cortex, ComponentStoreGateway)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling store-gateway headless service: %w", err)
+	// 4. Store Gateway (zone-aware or single StatefulSet)
+	requeue, err = r.reconcileStatefulComponent(ctx, cortex, ComponentStoreGateway, configData)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling store-gateway: %w", err)
 	}
-	if err := r.reconcileStatefulSet(ctx, buildStoreGatewayStatefulSet(cortex, configData)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling store-gateway StatefulSet: %w", err)
-	}
-	if err := r.reconcilePDB(ctx, buildPodDisruptionBudget(cortex, ComponentStoreGateway)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling store-gateway PDB: %w", err)
-	}
+	requeueNeeded = requeueNeeded || requeue
 
 	// 5. Distributor (Service + Deployment)
 	if err := r.reconcileService(ctx, buildComponentService(cortex, ComponentDistributor)); err != nil {
@@ -132,19 +127,15 @@ func (r *CortexReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("reconciling distributor deployment: %w", err)
 	}
 
-	// 6. Compactor (headless service + StatefulSet + PDB)
-	if err := r.reconcileService(ctx, buildHeadlessService(cortex, ComponentCompactor)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling compactor headless service: %w", err)
-	}
+	// 6. Compactor (ClusterIP service + zone-aware or single StatefulSet)
 	if err := r.reconcileService(ctx, buildComponentService(cortex, ComponentCompactor)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling compactor service: %w", err)
 	}
-	if err := r.reconcileStatefulSet(ctx, buildCompactorStatefulSet(cortex, configData)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling compactor StatefulSet: %w", err)
+	requeue, err = r.reconcileStatefulComponent(ctx, cortex, ComponentCompactor, configData)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling compactor: %w", err)
 	}
-	if err := r.reconcilePDB(ctx, buildPodDisruptionBudget(cortex, ComponentCompactor)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling compactor PDB: %w", err)
-	}
+	requeueNeeded = requeueNeeded || requeue
 
 	// 7. Querier (Service + Deployment)
 	if err := r.reconcileService(ctx, buildComponentService(cortex, ComponentQuerier)); err != nil {
@@ -172,7 +163,211 @@ func (r *CortexReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
+	if requeueNeeded {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
 	return ctrl.Result{}, nil
+}
+
+// reconcileStatefulComponent reconciles a stateful component (ingester or store-gateway)
+// with zone awareness support. It handles creation/update of zone-specific or single
+// StatefulSets, headless services, and PDBs, plus cleanup of stale resources when
+// switching between zone-aware and non-zone modes.
+// The returned bool signals whether the reconciler should requeue (zone rollout in progress).
+func (r *CortexReconciler) reconcileStatefulComponent(ctx context.Context, cortex *cortexv1alpha1.Cortex, component, configData string) (bool, error) {
+	if cortex.Spec.IsZoneAwarenessEnabled() {
+		return r.reconcileZoneAwareStatefulComponent(ctx, cortex, component, configData)
+	}
+	return r.reconcileNonZoneStatefulComponent(ctx, cortex, component, configData)
+}
+
+// reconcileZoneAwareStatefulComponent reconciles per-zone StatefulSets, services, and PDBs.
+// It uses two-phase logic: first create any missing StatefulSets (all zones simultaneously),
+// then apply updates sequentially — one zone at a time — waiting for each zone to finish
+// rolling out before updating the next. Returns true if a requeue is needed.
+func (r *CortexReconciler) reconcileZoneAwareStatefulComponent(ctx context.Context, cortex *cortexv1alpha1.Cortex, component, configData string) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	// Cross-zone headless service (selects all pods regardless of zone).
+	if err := r.reconcileService(ctx, buildHeadlessService(cortex, component)); err != nil {
+		return false, fmt.Errorf("reconciling %s cross-zone headless service: %w", component, err)
+	}
+
+	for _, zone := range cortex.Spec.ZoneAwareness.Zones {
+		// Per-zone headless service.
+		if err := r.reconcileService(ctx, buildZoneHeadlessService(cortex, component, zone)); err != nil {
+			return false, fmt.Errorf("reconciling %s zone %s headless service: %w", component, zone, err)
+		}
+
+		// Per-zone PDB.
+		if err := r.reconcilePDB(ctx, buildZonePodDisruptionBudget(cortex, component, zone)); err != nil {
+			return false, fmt.Errorf("reconciling %s zone %s PDB: %w", component, zone, err)
+		}
+	}
+
+	statefulSets := buildComponentStatefulSets(cortex, component, configData)
+
+	// Phase 1: Create any missing StatefulSets (non-sequential).
+	created := map[string]bool{}
+	for _, desired := range statefulSets {
+		existing := &appsv1.StatefulSet{}
+		err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
+		if apierrors.IsNotFound(err) {
+			if err := r.Create(ctx, desired); err != nil {
+				return false, fmt.Errorf("creating %s zone StatefulSet %s: %w", component, desired.Name, err)
+			}
+			created[desired.Name] = true
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("getting %s zone StatefulSet %s: %w", component, desired.Name, err)
+		}
+	}
+
+	// Phase 2: Sequential updates — one zone at a time.
+	// Skip StatefulSets that were just created in Phase 1.
+	for _, desired := range statefulSets {
+		if created[desired.Name] {
+			continue
+		}
+
+		existing := &appsv1.StatefulSet{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing); err != nil {
+			return false, fmt.Errorf("getting %s zone StatefulSet %s: %w", component, desired.Name, err)
+		}
+
+		// Check if the StatefulSet needs an update by comparing the fields we manage.
+		// We avoid comparing full specs because the API server adds defaults
+		// (probe timeouts, volume defaultMode, security contexts, etc.) that
+		// would cause spurious updates on every reconciliation.
+		if statefulSetNeedsUpdate(existing, desired) {
+			// Preserve immutable VolumeClaimTemplates.
+			desired.Spec.VolumeClaimTemplates = existing.Spec.VolumeClaimTemplates
+			existing.Spec = desired.Spec
+			existing.Labels = desired.Labels
+			if err := r.Update(ctx, existing); err != nil {
+				return false, fmt.Errorf("updating %s zone StatefulSet %s: %w", component, desired.Name, err)
+			}
+			logger.Info("Updated zone StatefulSet, waiting for rollout", "component", component, "statefulset", desired.Name)
+			return true, nil
+		}
+
+		if !isStatefulSetRolledOut(existing) {
+			logger.Info("Waiting for zone StatefulSet rollout", "component", component, "statefulset", existing.Name)
+			return true, nil
+		}
+	}
+
+	// Clean up old non-zone StatefulSet, PDB, and headless service.
+	if err := r.cleanupNonZoneStatefulResources(ctx, cortex, component); err != nil {
+		return false, fmt.Errorf("cleaning up non-zone %s resources: %w", component, err)
+	}
+
+	return false, nil
+}
+
+// reconcileNonZoneStatefulComponent reconciles a single StatefulSet (non-zone mode).
+func (r *CortexReconciler) reconcileNonZoneStatefulComponent(ctx context.Context, cortex *cortexv1alpha1.Cortex, component, configData string) (bool, error) {
+	if err := r.reconcileService(ctx, buildHeadlessService(cortex, component)); err != nil {
+		return false, fmt.Errorf("reconciling %s headless service: %w", component, err)
+	}
+
+	statefulSets := buildComponentStatefulSets(cortex, component, configData)
+
+	for _, sts := range statefulSets {
+		if err := r.reconcileStatefulSet(ctx, sts); err != nil {
+			return false, fmt.Errorf("reconciling %s StatefulSet: %w", component, err)
+		}
+	}
+
+	if err := r.reconcilePDB(ctx, buildPodDisruptionBudget(cortex, component)); err != nil {
+		return false, fmt.Errorf("reconciling %s PDB: %w", component, err)
+	}
+
+	// Clean up zone-specific resources if zone awareness was previously enabled.
+	if err := r.cleanupZoneStatefulResources(ctx, cortex, component); err != nil {
+		return false, fmt.Errorf("cleaning up zone %s resources: %w", component, err)
+	}
+
+	return false, nil
+}
+
+// cleanupNonZoneStatefulResources removes the single (non-zone) StatefulSet and PDB
+// for a component, used when switching to zone-aware mode.
+func (r *CortexReconciler) cleanupNonZoneStatefulResources(ctx context.Context, cortex *cortexv1alpha1.Cortex, component string) error {
+	// Delete the non-zone StatefulSet.
+	sts := &appsv1.StatefulSet{}
+	stsKey := types.NamespacedName{Name: resourceName(cortex, component), Namespace: cortex.Namespace}
+	if err := r.Get(ctx, stsKey, sts); err == nil {
+		if err := r.Delete(ctx, sts); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting non-zone StatefulSet %s: %w", stsKey.Name, err)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	// Delete the non-zone PDB.
+	pdb := &policyv1.PodDisruptionBudget{}
+	pdbKey := types.NamespacedName{Name: resourceName(cortex, component), Namespace: cortex.Namespace}
+	if err := r.Get(ctx, pdbKey, pdb); err == nil {
+		if err := r.Delete(ctx, pdb); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting non-zone PDB %s: %w", pdbKey.Name, err)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	return nil
+}
+
+// cleanupZoneStatefulResources removes zone-specific StatefulSets, PDBs, and headless
+// services for a component, used when switching from zone-aware to non-zone mode.
+func (r *CortexReconciler) cleanupZoneStatefulResources(ctx context.Context, cortex *cortexv1alpha1.Cortex, component string) error {
+	zoneLabel := labels.SelectorFromSet(map[string]string{
+		LabelInstance:  cortex.Name,
+		LabelComponent: component,
+	})
+
+	// List and delete zone StatefulSets.
+	stsList := &appsv1.StatefulSetList{}
+	if err := r.List(ctx, stsList, client.InNamespace(cortex.Namespace), client.MatchingLabelsSelector{Selector: zoneLabel}); err != nil {
+		return err
+	}
+	for i := range stsList.Items {
+		if _, hasZone := stsList.Items[i].Labels[LabelZone]; hasZone {
+			if err := r.Delete(ctx, &stsList.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+	}
+
+	// List and delete zone PDBs.
+	pdbList := &policyv1.PodDisruptionBudgetList{}
+	if err := r.List(ctx, pdbList, client.InNamespace(cortex.Namespace), client.MatchingLabelsSelector{Selector: zoneLabel}); err != nil {
+		return err
+	}
+	for i := range pdbList.Items {
+		if _, hasZone := pdbList.Items[i].Labels[LabelZone]; hasZone {
+			if err := r.Delete(ctx, &pdbList.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+	}
+
+	// List and delete zone headless services.
+	svcList := &corev1.ServiceList{}
+	if err := r.List(ctx, svcList, client.InNamespace(cortex.Namespace), client.MatchingLabelsSelector{Selector: zoneLabel}); err != nil {
+		return err
+	}
+	for i := range svcList.Items {
+		if _, hasZone := svcList.Items[i].Labels[LabelZone]; hasZone {
+			if err := r.Delete(ctx, &svcList.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 // getConfigData generates or fetches the Cortex configuration YAML.
@@ -331,19 +526,25 @@ func (r *CortexReconciler) updateStatus(ctx context.Context, cortex *cortexv1alp
 	}
 
 	// Gather StatefulSet statuses.
+	// For zone-aware components (ingester, store-gateway, compactor), aggregate across all zone StatefulSets.
 	for _, component := range []string{ComponentIngester, ComponentStoreGateway, ComponentCompactor} {
-		sts := &appsv1.StatefulSet{}
-		key := types.NamespacedName{Name: resourceName(cortex, component), Namespace: cortex.Namespace}
-		if err := r.Get(ctx, key, sts); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return err
+		if cortex.Spec.IsZoneAwarenessEnabled() {
+			status := r.aggregateZoneStatefulSetStatus(ctx, cortex, component)
+			components[component] = status
+		} else {
+			sts := &appsv1.StatefulSet{}
+			key := types.NamespacedName{Name: resourceName(cortex, component), Namespace: cortex.Namespace}
+			if err := r.Get(ctx, key, sts); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return err
+				}
+				continue
 			}
-			continue
-		}
-		components[component] = cortexv1alpha1.ComponentStatus{
-			Replicas:        sts.Status.Replicas,
-			ReadyReplicas:   sts.Status.ReadyReplicas,
-			UpdatedReplicas: sts.Status.UpdatedReplicas,
+			components[component] = cortexv1alpha1.ComponentStatus{
+				Replicas:        sts.Status.Replicas,
+				ReadyReplicas:   sts.Status.ReadyReplicas,
+				UpdatedReplicas: sts.Status.UpdatedReplicas,
+			}
 		}
 	}
 
@@ -375,6 +576,22 @@ func (r *CortexReconciler) updateStatus(ctx context.Context, cortex *cortexv1alp
 	}
 
 	return r.Status().Update(ctx, cortex)
+}
+
+// aggregateZoneStatefulSetStatus aggregates the status of per-zone StatefulSets for a component.
+func (r *CortexReconciler) aggregateZoneStatefulSetStatus(ctx context.Context, cortex *cortexv1alpha1.Cortex, component string) cortexv1alpha1.ComponentStatus {
+	var status cortexv1alpha1.ComponentStatus
+	for _, zone := range cortex.Spec.ZoneAwareness.Zones {
+		sts := &appsv1.StatefulSet{}
+		key := types.NamespacedName{Name: zoneResourceName(cortex, component, zone), Namespace: cortex.Namespace}
+		if err := r.Get(ctx, key, sts); err != nil {
+			continue
+		}
+		status.Replicas += sts.Status.Replicas
+		status.ReadyReplicas += sts.Status.ReadyReplicas
+		status.UpdatedReplicas += sts.Status.UpdatedReplicas
+	}
+	return status
 }
 
 // setCondition sets a condition on the Cortex status.

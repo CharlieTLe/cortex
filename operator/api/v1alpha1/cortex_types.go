@@ -267,6 +267,29 @@ type StoreGatewaySpec struct {
 	ShardingEnabled *bool `json:"shardingEnabled,omitempty"`
 }
 
+// ZoneAwarenessSpec configures zone-aware replication for stateful components.
+type ZoneAwarenessSpec struct {
+	// Enabled enables zone-aware replication for ingesters and store-gateways.
+	Enabled bool `json:"enabled"`
+
+	// Zones is the list of availability zone names to distribute replicas across.
+	// +kubebuilder:validation:MinItems=2
+	Zones []string `json:"zones"`
+
+	// TopologyKey is the node label key used to identify zones.
+	// +kubebuilder:default="topology.kubernetes.io/zone"
+	// +optional
+	TopologyKey string `json:"topologyKey,omitempty"`
+}
+
+// GetTopologyKey returns the topology key, defaulting to "topology.kubernetes.io/zone".
+func (z *ZoneAwarenessSpec) GetTopologyKey() string {
+	if z == nil || z.TopologyKey == "" {
+		return "topology.kubernetes.io/zone"
+	}
+	return z.TopologyKey
+}
+
 // ServiceMonitorSpec defines ServiceMonitor creation configuration.
 type ServiceMonitorSpec struct {
 	// Enabled enables ServiceMonitor creation.
@@ -344,6 +367,10 @@ type CortexSpec struct {
 	// Compactor defines the compactor component configuration.
 	// +optional
 	Compactor *CompactorComponentSpec `json:"compactor,omitempty"`
+
+	// ZoneAwareness configures zone-aware replication for stateful components.
+	// +optional
+	ZoneAwareness *ZoneAwarenessSpec `json:"zoneAwareness,omitempty"`
 
 	// ServiceMonitor defines ServiceMonitor configuration.
 	// +optional
@@ -473,6 +500,11 @@ func (s *CortexSpec) IsAuthEnabled() bool {
 		return true
 	}
 	return *s.AuthEnabled
+}
+
+// IsZoneAwarenessEnabled returns whether zone-aware replication is enabled.
+func (s *CortexSpec) IsZoneAwarenessEnabled() bool {
+	return s.ZoneAwareness != nil && s.ZoneAwareness.Enabled && len(s.ZoneAwareness.Zones) > 0
 }
 
 // GetDefaultDataVolumeClaimSpec returns a default PVC spec for stateful components.

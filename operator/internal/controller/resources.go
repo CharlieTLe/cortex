@@ -43,6 +43,7 @@ const (
 	LabelComponent = "app.kubernetes.io/component"
 	LabelManagedBy = "app.kubernetes.io/managed-by"
 	LabelPartOf    = "app.kubernetes.io/part-of"
+	LabelZone      = "cortex.io/zone"
 
 	// Annotation keys.
 	AnnotationConfigHash = "cortex.io/config-hash"
@@ -114,6 +115,30 @@ func gossipServiceName(cortex *cortexv1alpha1.Cortex) string {
 // headlessServiceName returns the name for a component's headless service (StatefulSets).
 func headlessServiceName(cortex *cortexv1alpha1.Cortex, component string) string {
 	return fmt.Sprintf("%s-%s-headless", cortex.Name, component)
+}
+
+// zoneResourceName returns the name for a zone-specific resource.
+func zoneResourceName(cortex *cortexv1alpha1.Cortex, component, zone string) string {
+	return fmt.Sprintf("%s-%s-zone-%s", cortex.Name, component, zone)
+}
+
+// zoneHeadlessServiceName returns the name for a zone-specific headless service.
+func zoneHeadlessServiceName(cortex *cortexv1alpha1.Cortex, component, zone string) string {
+	return fmt.Sprintf("%s-%s-zone-%s-headless", cortex.Name, component, zone)
+}
+
+// zoneComponentLabels returns labels for a zone-specific component resource.
+func zoneComponentLabels(cortex *cortexv1alpha1.Cortex, component, zone string) map[string]string {
+	labels := componentLabels(cortex, component)
+	labels[LabelZone] = zone
+	return labels
+}
+
+// zoneSelectorLabels returns the minimal labels for zone-specific label selectors.
+func zoneSelectorLabels(cortex *cortexv1alpha1.Cortex, component, zone string) map[string]string {
+	labels := selectorLabels(cortex, component)
+	labels[LabelZone] = zone
+	return labels
 }
 
 // setOwnerReference sets the owner reference on a resource.

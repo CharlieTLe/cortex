@@ -29,9 +29,14 @@ This walks through deploying the operator and a Cortex cluster locally using Kin
 
 ### 1. Create a Kind cluster
 
+Create a multi-zone Kind cluster with one worker node per availability zone:
+
 ```sh
-kind create cluster --name cortex-test
+cd operator/
+make kind-create
 ```
+
+This uses `hack/dev/kind-config.yaml` which creates a control-plane node and three worker nodes labeled with `topology.kubernetes.io/zone` (zone-a, zone-b, zone-c).
 
 ### 2. Deploy everything
 

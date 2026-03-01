@@ -79,7 +79,7 @@ func buildDeployment(cortex *cortexv1alpha1.Cortex, component string, compSpec *
 						AnnotationConfigHash: configHash(configData),
 					},
 				},
-				Spec: buildPodSpec(cortex, component, compSpec),
+				Spec: buildPodSpec(cortex, component, compSpec, ""),
 			},
 		},
 	}
@@ -88,7 +88,9 @@ func buildDeployment(cortex *cortexv1alpha1.Cortex, component string, compSpec *
 }
 
 // buildPodSpec builds the PodSpec for a component.
-func buildPodSpec(cortex *cortexv1alpha1.Cortex, component string, compSpec *cortexv1alpha1.ComponentSpec) corev1.PodSpec {
+// When zone is non-empty, zone-specific node affinity, topology spread constraints,
+// and the CORTEX_AVAILABILITY_ZONE env var are injected.
+func buildPodSpec(cortex *cortexv1alpha1.Cortex, component string, compSpec *cortexv1alpha1.ComponentSpec, zone string) corev1.PodSpec {
 	spec := corev1.PodSpec{
 		Containers: []corev1.Container{
 			containerForComponent(cortex, component, compSpec),
@@ -110,6 +112,49 @@ func buildPodSpec(cortex *cortexv1alpha1.Cortex, component string, compSpec *cor
 		if compSpec.Affinity != nil {
 			spec.Affinity = compSpec.Affinity
 		}
+	}
+
+	if zone != "" {
+		topologyKey := cortex.Spec.ZoneAwareness.GetTopologyKey()
+
+		// Inject CORTEX_AVAILABILITY_ZONE env var.
+		spec.Containers[0].Env = append(spec.Containers[0].Env, corev1.EnvVar{
+			Name:  "CORTEX_AVAILABILITY_ZONE",
+			Value: zone,
+		})
+
+		// Build zone-pinning node affinity.
+		zoneNodeAffinity := &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{
+							{
+								Key:      topologyKey,
+								Operator: corev1.NodeSelectorOpIn,
+								Values:   []string{zone},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		// Merge with user affinity: preserve pod affinity/anti-affinity, override node affinity.
+		if spec.Affinity == nil {
+			spec.Affinity = &corev1.Affinity{}
+		}
+		spec.Affinity.NodeAffinity = zoneNodeAffinity
+
+		// Spread pods across nodes within the zone.
+		spec.TopologySpreadConstraints = append(spec.TopologySpreadConstraints, corev1.TopologySpreadConstraint{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: zoneSelectorLabels(cortex, component, zone),
+			},
+		})
 	}
 
 	return spec

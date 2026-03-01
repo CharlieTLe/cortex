@@ -348,3 +348,121 @@ func TestBuildWithCustomMemberlist(t *testing.T) {
 		t.Errorf("expected join_members=%q, got %q", expected, joinMembers[0])
 	}
 }
+
+func TestBuildWithZoneAwareness(t *testing.T) {
+	spec := &cortexv1alpha1.CortexSpec{
+		Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+		Storage: cortexv1alpha1.StorageSpec{
+			Backend: cortexv1alpha1.StorageBackendS3,
+			S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+		},
+		ZoneAwareness: &cortexv1alpha1.ZoneAwarenessSpec{
+			Enabled:     true,
+			Zones:       []string{"us-east-1a", "us-east-1b", "us-east-1c"},
+			TopologyKey: "topology.kubernetes.io/zone",
+		},
+	}
+
+	b := NewBuilder("test", "ns", spec)
+	configYAML, err := b.Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cfg map[string]interface{}
+	if err := yaml.Unmarshal([]byte(configYAML), &cfg); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	// Ingester should have zone awareness config.
+	ingester := cfg["ingester"].(map[string]interface{})
+	lifecycler := ingester["lifecycler"].(map[string]interface{})
+
+	if v := lifecycler["availability_zone"]; v != "${CORTEX_AVAILABILITY_ZONE}" {
+		t.Errorf("expected availability_zone=${CORTEX_AVAILABILITY_ZONE}, got %v", v)
+	}
+
+	ring := lifecycler["ring"].(map[string]interface{})
+	if v := ring["zone_awareness_enabled"]; v != true {
+		t.Errorf("expected zone_awareness_enabled=true, got %v", v)
+	}
+
+	// Store gateway should have zone awareness config.
+	sg := cfg["store_gateway"].(map[string]interface{})
+	shardingRing := sg["sharding_ring"].(map[string]interface{})
+
+	if v := shardingRing["instance_availability_zone"]; v != "${CORTEX_AVAILABILITY_ZONE}" {
+		t.Errorf("expected instance_availability_zone=${CORTEX_AVAILABILITY_ZONE}, got %v", v)
+	}
+	if v := shardingRing["zone_awareness_enabled"]; v != true {
+		t.Errorf("expected zone_awareness_enabled=true, got %v", v)
+	}
+
+	// Compactor sharding_ring should NOT have zone awareness fields
+	// (Cortex compactor.RingConfig does not support them).
+	compactor := cfg["compactor"].(map[string]interface{})
+	compactorShardingRing := compactor["sharding_ring"].(map[string]interface{})
+
+	if _, ok := compactorShardingRing["instance_availability_zone"]; ok {
+		t.Error("expected no compactor instance_availability_zone (compactor ring does not support zone awareness)")
+	}
+	if _, ok := compactorShardingRing["zone_awareness_enabled"]; ok {
+		t.Error("expected no compactor zone_awareness_enabled (compactor ring does not support zone awareness)")
+	}
+}
+
+func TestBuildWithoutZoneAwareness(t *testing.T) {
+	spec := &cortexv1alpha1.CortexSpec{
+		Image: cortexv1alpha1.ImageSpec{Tag: "v1.17.0"},
+		Storage: cortexv1alpha1.StorageSpec{
+			Backend: cortexv1alpha1.StorageBackendS3,
+			S3:      &cortexv1alpha1.S3StorageSpec{BucketName: "test"},
+		},
+	}
+
+	b := NewBuilder("test", "ns", spec)
+	configYAML, err := b.Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cfg map[string]interface{}
+	if err := yaml.Unmarshal([]byte(configYAML), &cfg); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	// Ingester should NOT have zone awareness config.
+	ingester := cfg["ingester"].(map[string]interface{})
+	lifecycler := ingester["lifecycler"].(map[string]interface{})
+
+	if _, ok := lifecycler["availability_zone"]; ok {
+		t.Error("expected no availability_zone when zone awareness is disabled")
+	}
+
+	ring := lifecycler["ring"].(map[string]interface{})
+	if _, ok := ring["zone_awareness_enabled"]; ok {
+		t.Error("expected no zone_awareness_enabled when zone awareness is disabled")
+	}
+
+	// Store gateway should NOT have zone awareness config.
+	sg := cfg["store_gateway"].(map[string]interface{})
+	shardingRing := sg["sharding_ring"].(map[string]interface{})
+
+	if _, ok := shardingRing["instance_availability_zone"]; ok {
+		t.Error("expected no instance_availability_zone when zone awareness is disabled")
+	}
+	if _, ok := shardingRing["zone_awareness_enabled"]; ok {
+		t.Error("expected no zone_awareness_enabled when zone awareness is disabled")
+	}
+
+	// Compactor should NOT have zone awareness config.
+	compactor := cfg["compactor"].(map[string]interface{})
+	compactorShardingRing := compactor["sharding_ring"].(map[string]interface{})
+
+	if _, ok := compactorShardingRing["instance_availability_zone"]; ok {
+		t.Error("expected no compactor instance_availability_zone when zone awareness is disabled")
+	}
+	if _, ok := compactorShardingRing["zone_awareness_enabled"]; ok {
+		t.Error("expected no compactor zone_awareness_enabled when zone awareness is disabled")
+	}
+}

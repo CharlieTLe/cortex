@@ -1,12 +1,18 @@
-# AGENTS.md
+# CLAUDE.md
 
-This file provides guidance to AI coding agents when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-Cortex is a horizontally scalable, highly available, multi-tenant, long-term storage solution for Prometheus metrics. It uses a microservices architecture with components that can run as separate processes or as a single binary.
+Cortex is a horizontally scalable, highly available, multi-tenant, long-term storage solution for Prometheus metrics. This branch (`operator`) adds a Kubernetes operator that manages Cortex clusters via a single `Cortex` Custom Resource.
+
+The repository contains two Go modules:
+- **Root module** (`github.com/cortexproject/cortex`) — the core Cortex server and libraries
+- **Operator module** (`operator/`) — a Kubebuilder-based Kubernetes operator with its own `go.mod`
 
 ## Build Commands
+
+### Core Cortex
 
 ```bash
 make                           # Build all (runs in Docker container by default)
@@ -18,32 +24,46 @@ make doc                       # Generate config documentation (run after changi
 make ./cmd/cortex/.uptodate    # Build Cortex Docker image for integration tests
 ```
 
-## Vendored Dependencies
+### Operator
 
-Go modules are vendored in the `vendor/` folder. When upgrading a dependency or component:
+All operator commands run from `operator/`:
 
 ```bash
-go get github.com/some/dependency@version  # Update go.mod
-go mod vendor                               # Sync vendor folder
-go mod tidy                                 # Clean up go.mod/go.sum
+cd operator/
+make manifests       # Regenerate CRD, RBAC, and webhook manifests (run after changing API types)
+make generate        # Regenerate DeepCopy methods (run after changing API types)
+make build           # Build operator binary
+make docker-build    # Build Docker image (IMG=cortex-operator:dev)
+make test            # Run unit + envtest tests
+make test-e2e        # Run e2e tests (requires Kind cluster)
+make lint            # Run golangci-lint
+make kind-setup      # Full local dev: Kind + MinIO + CRDs + operator + sample CR
+make kind-redeploy   # Rebuild and restart operator in existing Kind cluster
+make kind-status     # Show pod/service status
+make kind-teardown   # Delete Kind cluster
 ```
 
-**Important**: Always check the `vendor/` folder for upstream library code (e.g., `vendor/github.com/prometheus/alertmanager/` for Alertmanager internals). Do not modify vendored code directly.
+Run operator locally without cluster deployment:
+```bash
+cd operator/
+bin/kustomize build config/crd | kubectl apply --server-side -f -
+ENABLE_WEBHOOKS=false go run ./cmd/main.go
+```
 
 ## Testing
 
-### Unit Tests
+### Core Cortex Unit Tests
 
 ```bash
-go test -timeout 2400s -tags "netgo slicelabels" ./...          # Run tests with CI configuration
+go test -timeout 2400s -tags "netgo slicelabels" ./...
 ```
 
-### Integration Tests
+### Core Cortex Integration Tests
 
-Integration tests require Docker and the Cortex image to be built first:
+Require Docker and the Cortex image built first:
 
 ```bash
-make ./cmd/cortex/.uptodate    # Build Cortex Docker image first
+make ./cmd/cortex/.uptodate    # Build image first
 
 # Run all integration tests
 go test -v -tags=integration,requires_docker,integration_alertmanager,integration_memberlist,integration_querier,integration_ruler,integration_query_fuzz ./integration/...
@@ -52,14 +72,27 @@ go test -v -tags=integration,requires_docker,integration_alertmanager,integratio
 go test -v -tags=integration,integration_ruler -timeout 2400s -count=1 ./integration/... -run "^TestRulerAPISharding$"
 ```
 
-Environment variables for integration tests:
+### Operator Tests
 
-- `CORTEX_IMAGE` - Docker image to test (default: `quay.io/cortexproject/cortex:latest`)
-- `E2E_TEMP_DIR` - Directory for temporary test files
+```bash
+cd operator/
+make test            # Unit + envtest (config builder, controller, webhooks)
+make test-e2e        # E2e on Kind cluster (uses Ginkgo)
+```
+
+## Vendored Dependencies
+
+Go modules are vendored in `vendor/` (root module only). When upgrading a dependency:
+
+```bash
+go get github.com/some/dependency@version
+go mod vendor
+go mod tidy
+```
+
+Do not modify vendored code directly. Check `vendor/` for upstream library code when investigating behavior.
 
 ## Code Formatting
-
-Use goimports with Cortex-specific import grouping:
 
 ```bash
 goimports -local github.com/cortexproject/cortex -w ./path/to/file.go
@@ -69,48 +102,49 @@ Import order: stdlib, third-party packages, internal Cortex packages (separated 
 
 ## Architecture
 
-### Write Path
+### Core Cortex Components
 
-- **Distributor** (stateless) - Receives samples via remote write, validates, distributes to ingesters using consistent hashing
-- **Ingester** (semi-stateful) - Stores samples in memory, periodically flushes to long-term storage (TSDB blocks)
+**Write path:** Distributor (stateless) → Ingester (semi-stateful, TSDB blocks)
+**Read path:** Query Frontend (optional) → Querier (stateless) → Ingesters + Store Gateway
+**Storage:** Compactor (stateless), Store Gateway (semi-stateful) — blocks in S3/GCS/Azure/Swift
+**Optional:** Ruler, Alertmanager, Configs API
 
-### Read Path
+**Key patterns:** Hash ring (Consul/Etcd/memberlist), multi-tenancy via `X-Scope-OrgID` header, TSDB blocks storage
 
-- **Querier** (stateless) - Executes PromQL queries across ingesters and long-term storage
-- **Query Frontend** (optional, stateless) - Query caching, splitting, and queueing
-- **Query Scheduler** (optional, stateless) - Moves queue from frontend for independent scaling
+**Entry points:** `cmd/cortex/main.go`, `pkg/cortex/cortex.go` (service orchestration)
 
-### Storage
+### Operator Architecture
 
-- **Compactor** (stateless) - Compacts TSDB blocks in object storage
-- **Store Gateway** (semi-stateful) - Queries blocks from object storage
+The operator lives entirely in `operator/` with this structure:
 
-### Optional Services
+- `api/v1alpha1/` — CRD type definitions (`Cortex` custom resource spec/status)
+- `internal/controller/` — Reconciliation loop, creates K8s workloads from CR spec
+- `internal/config/` — Config builder: converts CR spec → Cortex YAML configuration
+- `internal/webhook/` — Validation and defaulting webhooks
+- `cmd/main.go` — Operator entry point
+- `config/` — Kustomize manifests (CRDs, RBAC, samples)
+- `hack/dev/` — Local development helpers (MinIO, sample CRs, operator deployment)
+- `test/e2e/` — End-to-end tests
 
-- **Ruler** - Executes recording rules and alerts
-- **Alertmanager** - Multi-tenant alert routing
-- **Configs API** - Configuration management
+**Reconciliation flow:**
+1. Generate Cortex config YAML from CR spec (or use `externalConfig` escape hatch)
+2. Create/update ConfigMap with config (SHA-256 hash in pod annotations triggers rolling restarts)
+3. Reconcile each component: Services, Deployments (distributor, querier, query-frontend), StatefulSets with PVCs (ingester, store-gateway, compactor), PodDisruptionBudgets
+4. Update CR status conditions (ConfigReady, Ready, Degraded)
 
-### Key Patterns
+All created resources have OwnerReferences for automatic garbage collection on CR deletion.
 
-- **Hash Ring** - Consistent hashing via Consul, Etcd, or memberlist gossip for data distribution
-- **Multi-tenancy** - Tenant isolation via `X-Scope-OrgID` header
-- **Blocks Storage** - TSDB-based storage with 2-hour block ranges, stored in S3/GCS/Azure/Swift
-
-### Main Entry Points
-
-- `cmd/cortex/main.go` - Main Cortex binary
-- `pkg/cortex/cortex.go` - Service orchestration and configuration
+**When modifying API types** (`api/v1alpha1/`), always run `make manifests generate` afterward.
 
 ## Code Conventions
 
-- **No global variables** - Use dependency injection
-- **Metrics**: Register with `promauto.With(reg)`, never use global prometheus registerer
-- **Config naming**: YAML uses `snake_case`, CLI flags use `kebab-case`
-- **Logging**: Use `github.com/go-kit/log` (not `github.com/go-kit/kit/log`)
+- **No global variables** — use dependency injection
+- **Metrics:** Register with `promauto.With(reg)`, never use global prometheus registerer
+- **Config naming:** YAML uses `snake_case`, CLI flags use `kebab-case`
+- **Logging:** Use `github.com/go-kit/log` (not `github.com/go-kit/kit/log`)
 
 ## PR Requirements
 
 - Sign commits with DCO: `git commit -s -m "message"`
-- Run `make doc` if config/flags changed
+- Run `make doc` if config/flags changed in core Cortex
 - Include CHANGELOG entry for user-facing changes

@@ -136,18 +136,27 @@ func (b *Builder) buildIngester() map[string]interface{} {
 		numTokens = b.spec.Ring.GetNumTokens()
 	}
 
-	return map[string]interface{}{
-		"lifecycler": map[string]interface{}{
-			"join_after":     "0s",
-			"num_tokens":     numTokens,
-			"observe_period": "5s",
-			"ring": map[string]interface{}{
-				"replication_factor": replicationFactor,
-				"kvstore": map[string]interface{}{
-					"store": "memberlist",
-				},
-			},
+	ring := map[string]interface{}{
+		"replication_factor": replicationFactor,
+		"kvstore": map[string]interface{}{
+			"store": "memberlist",
 		},
+	}
+
+	lifecycler := map[string]interface{}{
+		"join_after":     "0s",
+		"num_tokens":     numTokens,
+		"observe_period": "5s",
+		"ring":           ring,
+	}
+
+	if b.spec.IsZoneAwarenessEnabled() {
+		lifecycler["availability_zone"] = "${CORTEX_AVAILABILITY_ZONE}"
+		ring["zone_awareness_enabled"] = true
+	}
+
+	return map[string]interface{}{
+		"lifecycler": lifecycler,
 	}
 }
 
@@ -234,17 +243,29 @@ func (b *Builder) buildStoreGateway() map[string]interface{} {
 		shardingEnabled = b.spec.StoreGateway.GetShardingEnabled()
 	}
 
+	shardingRing := map[string]interface{}{
+		"kvstore": map[string]interface{}{
+			"store": "memberlist",
+		},
+	}
+
+	if b.spec.IsZoneAwarenessEnabled() {
+		shardingRing["instance_availability_zone"] = "${CORTEX_AVAILABILITY_ZONE}"
+		shardingRing["zone_awareness_enabled"] = true
+	}
+
 	return map[string]interface{}{
 		"sharding_enabled": shardingEnabled,
-		"sharding_ring": map[string]interface{}{
-			"kvstore": map[string]interface{}{
-				"store": "memberlist",
-			},
-		},
+		"sharding_ring":    shardingRing,
 	}
 }
 
 func (b *Builder) buildCompactor() map[string]interface{} {
+	// Note: The compactor's sharding_ring in Cortex does not support
+	// instance_availability_zone or zone_awareness_enabled fields (unlike
+	// ingester and store-gateway). Zone-aware deployment is handled at the
+	// Kubernetes level via per-zone StatefulSets, but the ring config
+	// cannot include these fields.
 	return map[string]interface{}{
 		"sharding_ring": map[string]interface{}{
 			"kvstore": map[string]interface{}{

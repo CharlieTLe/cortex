@@ -151,3 +151,39 @@ func buildGossipService(cortex *cortexv1alpha1.Cortex) *corev1.Service {
 	setOwnerReference(cortex, svc)
 	return svc
 }
+
+// buildZoneHeadlessService builds a headless Service for a zone-specific StatefulSet.
+func buildZoneHeadlessService(cortex *cortexv1alpha1.Cortex, component, zone string) *corev1.Service {
+	svc := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Service",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      zoneHeadlessServiceName(cortex, component, zone),
+			Namespace: cortex.Namespace,
+			Labels:    zoneComponentLabels(cortex, component, zone),
+		},
+		Spec: corev1.ServiceSpec{
+			Type:      corev1.ServiceTypeClusterIP,
+			ClusterIP: "None",
+			Selector:  zoneSelectorLabels(cortex, component, zone),
+			Ports: []corev1.ServicePort{
+				{
+					Name:       PortNameHTTP,
+					Port:       int32(config.DefaultHTTPPort),
+					TargetPort: intstr.FromString(PortNameHTTP),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       PortNameGRPC,
+					Port:       int32(config.DefaultGRPCPort),
+					TargetPort: intstr.FromString(PortNameGRPC),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
+	}
+	setOwnerReference(cortex, svc)
+	return svc
+}

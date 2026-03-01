@@ -159,6 +159,11 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 
 KIND_CLUSTER_NAME ?= cortex-test
 CORTEX_IMAGE ?= quay.io/cortexproject/cortex:v1.20.0
+KIND_CONFIG ?= hack/dev/kind-config.yaml
+
+.PHONY: kind-create
+kind-create: ## Create a Kind cluster with multi-zone worker nodes.
+	kind create cluster --name $(KIND_CLUSTER_NAME) --config $(KIND_CONFIG)
 
 .PHONY: kind-setup
 kind-setup: manifests kustomize docker-build ## Set up a full local dev environment in Kind.
@@ -180,8 +185,8 @@ kind-setup: manifests kustomize docker-build ## Set up a full local dev environm
 	$(KUBECTL) -n minio wait --for=condition=available deployment/minio --timeout=120s
 	@echo "==> Waiting for bucket creation job..."
 	$(KUBECTL) -n minio wait --for=condition=complete job/minio-bucket-init --timeout=120s
-	@echo "==> Deploying Cortex CR..."
-	$(KUBECTL) apply -f hack/dev/cortex-sample.yaml
+	@echo "==> Deploying Cortex CR (zone-aware)..."
+	$(KUBECTL) apply -f hack/dev/cortex-sample-zone-aware.yaml
 	@echo ""
 	@echo "Setup complete! Run 'make kind-status' to check pod status."
 	@echo "It may take a few minutes for all Cortex pods to become ready."
