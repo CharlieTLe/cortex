@@ -37,7 +37,7 @@ make docker-build    # Build Docker image (IMG=cortex-operator:dev)
 make test            # Run unit + envtest tests
 make test-e2e        # Run e2e tests (requires Kind cluster)
 make lint            # Run golangci-lint
-make kind-setup      # Full local dev: Kind + MinIO + CRDs + operator + sample CR
+make kind-setup      # Full local dev: Kind + CubeFS + CRDs + operator + sample CR
 make kind-redeploy   # Rebuild and restart operator in existing Kind cluster
 make kind-status     # Show pod/service status
 make kind-teardown   # Delete Kind cluster
@@ -123,7 +123,7 @@ The operator lives entirely in `operator/` with this structure:
 - `internal/webhook/` — Validation and defaulting webhooks
 - `cmd/main.go` — Operator entry point
 - `config/` — Kustomize manifests (CRDs, RBAC, samples)
-- `hack/dev/` — Local development helpers (MinIO, sample CRs, operator deployment)
+- `hack/dev/` — Local development helpers (CubeFS, sample CRs, operator deployment)
 - `test/e2e/` — End-to-end tests
 
 **Reconciliation flow:**

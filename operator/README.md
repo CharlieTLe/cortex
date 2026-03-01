@@ -25,7 +25,7 @@ Instead of manually creating Deployments, StatefulSets, ConfigMaps, and Services
 
 ## Quick Start (Kind)
 
-This walks through deploying the operator and a Cortex cluster locally using Kind with MinIO as the S3-compatible storage backend.
+This walks through deploying the operator and a Cortex cluster locally using Kind with CubeFS as the S3-compatible storage backend.
 
 ### 1. Create a Kind cluster
 
@@ -40,7 +40,7 @@ This uses `hack/dev/kind-config.yaml` which creates a control-plane node and thr
 
 ### 2. Deploy everything
 
-A single Makefile target builds the operator image, loads it into Kind, installs CRDs, deploys the operator, sets up MinIO with a pre-created bucket, and applies a sample Cortex CR:
+A single Makefile target builds the operator image, loads it into Kind, installs CRDs, deploys the operator, sets up CubeFS with a pre-created bucket, and applies a sample Cortex CR:
 
 ```sh
 cd operator/

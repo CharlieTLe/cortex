@@ -159,6 +159,7 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 
 KIND_CLUSTER_NAME ?= cortex-test
 CORTEX_IMAGE ?= quay.io/cortexproject/cortex:v1.20.0
+CUBEFS_IMAGE ?= cubefs/cfs-server:v3.5.0
 KIND_CONFIG ?= hack/dev/kind-config.yaml
 
 .PHONY: kind-create
@@ -173,6 +174,10 @@ kind-setup: manifests kustomize docker-build ## Set up a full local dev environm
 	$(CONTAINER_TOOL) pull $(CORTEX_IMAGE) 2>/dev/null || true
 	@echo "==> Loading Cortex image into Kind..."
 	kind load docker-image $(CORTEX_IMAGE) --name $(KIND_CLUSTER_NAME)
+	@echo "==> Pulling CubeFS image (if not already present)..."
+	$(CONTAINER_TOOL) pull $(CUBEFS_IMAGE) 2>/dev/null || true
+	@echo "==> Loading CubeFS image into Kind..."
+	kind load docker-image $(CUBEFS_IMAGE) --name $(KIND_CLUSTER_NAME)
 	@echo "==> Installing metrics-server..."
 	$(KUBECTL) apply --server-side -f hack/dev/metrics-server.yaml
 	@echo "==> Installing CRDs..."
@@ -181,12 +186,22 @@ kind-setup: manifests kustomize docker-build ## Set up a full local dev environm
 	$(KUBECTL) apply --server-side -f hack/dev/operator-deploy.yaml
 	@echo "==> Waiting for operator to be ready..."
 	$(KUBECTL) -n cortex-system wait --for=condition=available deployment/cortex-operator --timeout=120s
-	@echo "==> Deploying MinIO..."
-	$(KUBECTL) apply --server-side -f hack/dev/minio.yaml
-	@echo "==> Waiting for MinIO to be ready..."
-	$(KUBECTL) -n minio wait --for=condition=available deployment/minio --timeout=120s
-	@echo "==> Waiting for bucket creation job..."
-	$(KUBECTL) -n minio wait --for=condition=complete job/minio-bucket-init --timeout=120s
+	@echo "==> Deploying CubeFS..."
+	helm install cubefs cubefs-helm/cubefs --namespace cubefs --create-namespace -f hack/dev/cubefs-values.yaml --wait --timeout 5m
+	@echo "==> Initializing CubeFS (user, volume, credentials)..."
+	@$(KUBECTL) create namespace cortex 2>/dev/null || true
+	@CREDS=$$($(KUBECTL) -n cubefs run cubefs-init --rm -i --restart=Never --image=curlimages/curl:8.5.0 -- sh -c ' \
+		RESP=$$(curl -sf -X POST http://master-service:17010/user/create -d '"'"'{"id":"cortex","type":2}'"'"'); \
+		AK=$$(echo "$$RESP" | grep -o "\"access_key\":\"[^\"]*\"" | cut -d\" -f4); \
+		SK=$$(echo "$$RESP" | grep -o "\"secret_key\":\"[^\"]*\"" | cut -d\" -f4); \
+		curl -sf "http://master-service:17010/admin/createVol?name=cortex-blocks&owner=cortex&capacity=10&dpReplicaNum=1&mpReplicaNum=1" > /dev/null; \
+		echo "CUBEFS_CREDS:$$AK:$$SK"' 2>&1 | grep '^CUBEFS_CREDS:') && \
+	AK=$$(echo "$$CREDS" | cut -d: -f2) && \
+	SK=$$(echo "$$CREDS" | cut -d: -f3) && \
+	$(KUBECTL) -n cortex create secret generic cortex-s3-credentials \
+		--from-literal=AWS_ACCESS_KEY_ID="$$AK" \
+		--from-literal=AWS_SECRET_ACCESS_KEY="$$SK" \
+		--dry-run=client -o yaml | $(KUBECTL) apply -f -
 	@echo "==> Deploying Cortex CR (zone-aware)..."
 	$(KUBECTL) apply -f hack/dev/cortex-sample-zone-aware.yaml
 	@echo ""
@@ -211,8 +226,8 @@ kind-status: ## Show status of pods, CR, and services in the cortex namespace.
 	@echo "==> Operator pod:"
 	@$(KUBECTL) -n cortex-system get pods 2>/dev/null || echo "  No operator pod found"
 	@echo ""
-	@echo "==> MinIO pod:"
-	@$(KUBECTL) -n minio get pods 2>/dev/null || echo "  No MinIO pod found"
+	@echo "==> CubeFS pods:"
+	@$(KUBECTL) -n cubefs get pods 2>/dev/null || echo "  No CubeFS pods found"
 
 .PHONY: kind-redeploy
 kind-redeploy: docker-build ## Rebuild operator image, load into Kind, and restart the operator.

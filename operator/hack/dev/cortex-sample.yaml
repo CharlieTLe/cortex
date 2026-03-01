@@ -4,16 +4,6 @@ kind: Namespace
 metadata:
   name: cortex
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cortex-s3-credentials
-  namespace: cortex
-type: Opaque
-stringData:
-  AWS_ACCESS_KEY_ID: minio
-  AWS_SECRET_ACCESS_KEY: minio123
----
 apiVersion: cortex.cortex.io/v1alpha1
 kind: Cortex
 metadata:
@@ -34,7 +24,7 @@ spec:
     backend: s3
     s3:
       bucketName: cortex-blocks
-      endpoint: minio.minio.svc.cluster.local:9000
+      endpoint: objectnode-service.cubefs.svc.cluster.local:1601
       insecure: true
     secretRef:
       name: cortex-s3-credentials

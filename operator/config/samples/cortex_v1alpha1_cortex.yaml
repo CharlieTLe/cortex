@@ -17,7 +17,7 @@ spec:
     backend: s3
     s3:
       bucketName: cortex-blocks
-      endpoint: minio.minio.svc.cluster.local:9000
+      endpoint: objectnode-service.cubefs.svc.cluster.local:1601
       insecure: true
     secretRef:
       name: cortex-s3-credentials

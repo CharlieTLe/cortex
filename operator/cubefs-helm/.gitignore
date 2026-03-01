@@ -1,0 +1,4 @@
+*.tgz
+build/bin
+build/cubefs
+.idea
