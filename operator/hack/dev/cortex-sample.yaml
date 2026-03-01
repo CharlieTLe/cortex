@@ -1,0 +1,68 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cortex
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cortex-s3-credentials
+  namespace: cortex
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: minio
+  AWS_SECRET_ACCESS_KEY: minio123
+---
+apiVersion: cortex.cortex.io/v1alpha1
+kind: Cortex
+metadata:
+  labels:
+    app.kubernetes.io/name: cortex
+    app.kubernetes.io/managed-by: cortex-operator
+  name: test
+  namespace: cortex
+spec:
+  image:
+    repository: quay.io/cortexproject/cortex
+    tag: v1.20.0
+    pullPolicy: IfNotPresent
+
+  authEnabled: true
+
+  storage:
+    backend: s3
+    s3:
+      bucketName: cortex-blocks
+      endpoint: minio.minio.svc.cluster.local:9000
+      insecure: true
+    secretRef:
+      name: cortex-s3-credentials
+
+  ring:
+    replicationFactor: 3
+    numTokens: 512
+
+  memberlist:
+    bindPort: 7946
+    abortIfJoinFails: false
+
+  distributor:
+    replicas: 2
+
+  ingester:
+    replicas: 3
+    terminationGracePeriodSeconds: 2400
+
+  querier:
+    replicas: 2
+
+  queryFrontend:
+    replicas: 2
+
+  storeGateway:
+    replicas: 2
+    shardingEnabled: true
+
+  compactor:
+    replicas: 1

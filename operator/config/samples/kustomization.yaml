@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- cortex_v1alpha1_cortex.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
