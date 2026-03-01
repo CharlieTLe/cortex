@@ -173,6 +173,8 @@ kind-setup: manifests kustomize docker-build ## Set up a full local dev environm
 	$(CONTAINER_TOOL) pull $(CORTEX_IMAGE) 2>/dev/null || true
 	@echo "==> Loading Cortex image into Kind..."
 	kind load docker-image $(CORTEX_IMAGE) --name $(KIND_CLUSTER_NAME)
+	@echo "==> Installing metrics-server..."
+	$(KUBECTL) apply --server-side -f hack/dev/metrics-server.yaml
 	@echo "==> Installing CRDs..."
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply --server-side -f -
 	@echo "==> Deploying operator..."
